@@ -1,0 +1,170 @@
+<?xml version="1.0"?>
+<robot name="XML">
+
+<!-- material color setting -->
+<material name="white">
+  <color rgba="1.000 1.000 1.000 1.0"/>
+</material>
+
+  <link name="base_link"/>
+
+  <joint name="base_link_to_base_link_sub" type="fixed">
+    <origin xyz="0 0 0" rpy="0.0 0.0 0.0"/>
+    <parent link="base_link"/>
+    <child link="base_link_sub"/>
+  </joint>
+
+  <link name="base_link_sub">
+    <inertial>
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
+      <mass value="0"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+  </link>
+
+  <joint name="base_link_sub_to_Frame_only_STL" type="revolute">
+    <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
+    <axis xyz="0 1 0"/>
+    <parent link="base_link_sub"/>
+    <child link="Frame_only_STL"/>
+    <limit lower="-3.14159" upper="3.14159" effort="1.37" velocity="7.0"/>
+    <dynamics damping="0.18" friction="0.005"/>
+  </joint>
+  <gazebo reference="base_link_sub_to_Frame_only_STL">
+    <implicitSpringDamper>true</implicitSpringDamper>
+    <springStiffness>100</springStiffness>
+    <springReference>0.0</springReference>
+  </gazebo>
+
+  <link name="Frame_only_STL">
+    <inertial>
+      <origin xyz="0.38972 -95.362751 0.334853" rpy="0.0 0.0 0.0"/>
+      <mass value="11328708.201834924519062"/>
+      <inertia ixx="1128857633645.655517578125" ixy="-294938608.16349458694458" ixz="-49121238.767162702977657" iyy="1440582021221.099365234375" iyz="-108383105.360172227025032" izz="963864822594.31494140625"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file:///home/ubuntu/Desktop/Trail_2-20260401T020822Z-1-001/Trail_2/XML_description/meshes/Frame only STL.stl"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+  <joint name="Frame_only_STL_to_BR_1" type="revolute">
+    <origin xyz="468.0 48.0 -515.39" rpy="0.0 0.0 0.0"/>
+    <axis xyz="0 1 0"/>
+    <parent link="Frame_only_STL"/>
+    <child link="BR_1"/>
+    <limit lower="-3.14159" upper="3.14159" effort="1.37" velocity="7.0"/>
+    <dynamics damping="0.18" friction="0.005"/>
+  </joint>
+  <gazebo reference="Frame_only_STL_to_BR_1">
+    <implicitSpringDamper>true</implicitSpringDamper>
+    <springStiffness>100</springStiffness>
+    <springReference>0.0</springReference>
+  </gazebo>
+
+  <link name="BR_1">
+    <inertial>
+      <origin xyz="-0.0 -1.520206 0.0" rpy="0.0 0.0 0.0"/>
+      <mass value="55310.553331254413933"/>
+      <inertia ixx="2133257654.298996686935425" ixy="0.00192179" ixz="66723688.658028796315193" iyy="2138430844.72761869430542" iyz="0.0056059" izz="200120878.203556567430496"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file:///home/ubuntu/Desktop/Trail_2-20260401T020822Z-1-001/Trail_2/XML_description/meshes/FL.stl"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+  <joint name="Frame_only_STL_to_BL_1" type="revolute">
+    <origin xyz="-468.0 48.0 -515.39" rpy="0.0 0.0 0.0"/>
+    <axis xyz="0 1 0"/>
+    <parent link="Frame_only_STL"/>
+    <child link="BL_1"/>
+    <limit lower="-3.14159" upper="3.14159" effort="1.37" velocity="7.0"/>
+    <dynamics damping="0.18" friction="0.005"/>
+  </joint>
+  <gazebo reference="Frame_only_STL_to_BL_1">
+    <implicitSpringDamper>true</implicitSpringDamper>
+    <springStiffness>100</springStiffness>
+    <springReference>0.0</springReference>
+  </gazebo>
+
+  <link name="BL_1">
+    <inertial>
+      <origin xyz="-0.0 -1.520206 0.0" rpy="0.0 0.0 0.0"/>
+      <mass value="55310.553331254413933"/>
+      <inertia ixx="2133257654.298996686935425" ixy="0.00192179" ixz="66723688.658028796315193" iyy="2138430844.72761869430542" iyz="0.0056059" izz="200120878.203556567430496"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file:///home/ubuntu/Desktop/Trail_2-20260401T020822Z-1-001/Trail_2/XML_description/meshes/FR.stl"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+  <joint name="Frame_only_STL_to_BR" type="revolute">
+    <origin xyz="468.0 48.0 515.39" rpy="0.0 0.0 0.0"/>
+    <axis xyz="0 1 0"/>
+    <parent link="Frame_only_STL"/>
+    <child link="BR"/>
+    <limit lower="-3.14159" upper="3.14159" effort="1.37" velocity="7.0"/>
+    <dynamics damping="0.18" friction="0.005"/>
+  </joint>
+  <gazebo reference="Frame_only_STL_to_BR">
+    <implicitSpringDamper>true</implicitSpringDamper>
+    <springStiffness>100</springStiffness>
+    <springReference>0.0</springReference>
+  </gazebo>
+
+  <link name="BR">
+    <inertial>
+      <origin xyz="-0.0 -1.520206 0.0" rpy="0.0 0.0 0.0"/>
+      <mass value="55310.553331254413933"/>
+      <inertia ixx="2133257654.298996686935425" ixy="0.00192179" ixz="66723688.658028796315193" iyy="2138430844.72761869430542" iyz="0.0056059" izz="200120878.203556567430496"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file:///home/ubuntu/Desktop/Trail_2-20260401T020822Z-1-001/Trail_2/XML_description/meshes/BR.stl"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+  <joint name="Frame_only_STL_to_BL" type="revolute">
+    <origin xyz="-468.0 48.0 515.39" rpy="0.0 0.0 0.0"/>
+    <axis xyz="0 1 0"/>
+    <parent link="Frame_only_STL"/>
+    <child link="BL"/>
+    <limit lower="-3.14159" upper="3.14159" effort="1.37" velocity="7.0"/>
+    <dynamics damping="0.18" friction="0.005"/>
+  </joint>
+  <gazebo reference="Frame_only_STL_to_BL">
+    <implicitSpringDamper>true</implicitSpringDamper>
+    <springStiffness>100</springStiffness>
+    <springReference>0.0</springReference>
+  </gazebo>
+
+  <link name="BL">
+    <inertial>
+      <origin xyz="-0.0 -1.520206 0.0" rpy="0.0 0.0 0.0"/>
+      <mass value="55310.553331254413933"/>
+      <inertia ixx="2133257654.298996686935425" ixy="0.00192179" ixz="66723688.658028796315193" iyy="2138430844.72761869430542" iyz="0.0056059" izz="200120878.203556567430496"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file:///home/ubuntu/Desktop/Trail_2-20260401T020822Z-1-001/Trail_2/XML_description/meshes/BL.stl"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+</robot>
