@@ -1,0 +1,9 @@
+<?xml version="1.0" ?>
+<urdf_kitchen_collider version="1.0">
+  <mesh_file>BL.stl</mesh_file>
+  <collider type="box">
+    <geometry size_x="0.0645" size_y="0.0132" size_z="0.8128"/>
+    <position x="0.0000" y="-0.0046" z="0.0000"/>
+    <rotation roll="0.000000" pitch="0.000000" yaw="0.000000"/>
+  </collider>
+</urdf_kitchen_collider>
