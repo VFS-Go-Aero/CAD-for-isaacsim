@@ -290,6 +290,7 @@ The conda environment hasn't been created yet. Create it:
 ```bash
 conda create -n env_isaaclab_jazzy python=3.11 -y
 conda activate env_isaaclab_jazzy
+pip install --force-reinstall setuptools wheel
 pip install isaacsim==5.1.0.0 isaaclab==2.3.2
 pip install trimesh pymavlink mavsdk
 ```
