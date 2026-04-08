@@ -257,6 +257,59 @@ To switch from visualization to full Hardware-In-The-Loop (HIL) simulation:
 4. Switch PX4 to HIL mode (Isaac Sim sends sensor data, PX4 sends motor commands)
 5. Tune PX4 parameters to match real vehicle dynamics
 
+## Troubleshooting
+
+### `ModuleNotFoundError: No module named 'mavsdk'` (or pymavlink, trimesh, etc.)
+
+The conda env isn't properly activated. Check with `which python` — it should show:
+```
+/home/ubuntu/miniconda3/envs/env_isaaclab_jazzy/bin/python
+```
+
+If it shows `env_isaaclab` (without `_jazzy`) or `/usr/bin/python`, deactivate and re-activate:
+```bash
+conda deactivate
+conda deactivate
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate env_isaaclab_jazzy
+which python  # verify correct path
+```
+
+### `Error while loading conda entry point: conda-anaconda-tos`
+
+This is a harmless warning from conda plugins, not an error. Ignore it.
+
+### `_rclpy_pybind11.cpython-311` import error
+
+System ROS2 Jazzy (Python 3.12) is conflicting with the conda env (Python 3.11). Do NOT `source /opt/ros/jazzy/setup.bash` in the same shell as the conda env. Rosbridge should run in a separate terminal with system Python.
+
+### PX4 says `Insufficient capacity` on AWS
+
+GPU instances sometimes have no available capacity. Retry:
+```bash
+# Retry every 10 seconds for 10 minutes
+for i in $(seq 1 60); do
+  aws ec2 start-instances --instance-ids <ID> --region us-east-1 && break
+  sleep 10
+done
+```
+
+### Isaac Sim viewport is white/black
+
+- White: camera is pointing at empty space. Press **F** in the viewport to frame the scene.
+- Black: no lighting. Check the scene was built with `build_scene.py`.
+- Ensure `DISPLAY=:1` is set and DCV is running.
+
+### PX4 `COMMAND_DENIED` on arm
+
+PX4 may be in a bad state from a previous flight. Kill and restart:
+```bash
+pkill -9 -f "bin/px4"
+rm -f /tmp/px4_lock_*
+cd ~/PX4-Autopilot/build/px4_sitl_default
+PX4_SYS_AUTOSTART=10040 PX4_SIM_MODEL=sihsim_quadx bin/px4 -d
+```
+
 ## Cloud Deployment (AWS)
 
 For running on AWS with GPU:
