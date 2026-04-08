@@ -143,6 +143,7 @@ cp meshes/* ~/go_aero/meshes/
 cp build_scene.py open_scene.py px4_visualizer.py fly_demo.py px4_bridge.py ~/go_aero/
 
 # Build the USD scene (headless, takes ~60s)
+source ~/miniconda3/etc/profile.d/conda.sh
 conda activate env_isaaclab_jazzy
 export ROS_DISTRO=jazzy
 python ~/go_aero/build_scene.py --headless
@@ -169,8 +170,9 @@ Wait for `Ready for takeoff!`
 export DISPLAY=:1  # or your display
 export ROS_DISTRO=jazzy
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export LD_LIBRARY_PATH=$HOME/miniconda3/envs/env_isaaclab_jazzy/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/jazzy/lib:$LD_LIBRARY_PATH
+source ~/miniconda3/etc/profile.d/conda.sh
 conda activate env_isaaclab_jazzy
+export LD_LIBRARY_PATH=$HOME/miniconda3/envs/env_isaaclab_jazzy/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/jazzy/lib:$LD_LIBRARY_PATH
 
 python ~/go_aero/px4_visualizer.py --device cuda --mavlink-port 14550
 ```
@@ -181,6 +183,7 @@ Wait for `Visualizer running!` (~90 seconds for Isaac Sim to boot)
 
 ```bash
 source ~/miniconda3/etc/profile.d/conda.sh
+conda deactivate 2>/dev/null
 conda activate env_isaaclab_jazzy
 
 # Fly a square pattern (3 loops at 5m altitude)
