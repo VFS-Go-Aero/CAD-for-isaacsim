@@ -30,6 +30,12 @@ source ~/.bashrc
 ### 2. Conda Environment with Isaac Sim
 
 ```bash
+# Accept conda terms of service (required before creating envs)
+source ~/miniconda3/etc/profile.d/conda.sh
+conda config --set auto_activate_base false
+conda init bash
+source ~/.bashrc
+
 conda create -n env_isaaclab_jazzy python=3.11 -y
 conda activate env_isaaclab_jazzy
 pip install isaacsim==5.1.0.0 isaaclab==2.3.2
