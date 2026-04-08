@@ -275,6 +275,18 @@ conda activate env_isaaclab_jazzy
 which python  # verify correct path
 ```
 
+### `conda activate env_isaaclab_jazzy` fails / env doesn't exist
+
+The conda environment hasn't been created yet. Create it:
+```bash
+conda create -n env_isaaclab_jazzy python=3.11 -y
+conda activate env_isaaclab_jazzy
+pip install isaacsim==5.1.0.0 isaaclab==2.3.2
+pip install trimesh pymavlink mavsdk
+```
+
+Isaac Sim is ~15GB and takes several minutes to install via pip.
+
 ### `Error while loading conda entry point: conda-anaconda-tos`
 
 This is a harmless warning from conda plugins, not an error. Ignore it.
