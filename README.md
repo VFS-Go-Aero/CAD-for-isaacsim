@@ -180,6 +180,7 @@ Wait for `Visualizer running!` (~90 seconds for Isaac Sim to boot)
 ### Terminal 3: Fly
 
 ```bash
+source ~/miniconda3/etc/profile.d/conda.sh
 conda activate env_isaaclab_jazzy
 
 # Fly a square pattern (3 loops at 5m altitude)
