@@ -38,7 +38,40 @@ source ~/.bashrc
 
 conda create -n env_isaaclab_jazzy python=3.11 -y
 conda activate env_isaaclab_jazzy
-pip install isaacsim==5.1.0.0 isaaclab==2.3.2
+pip install --upgrade pip setuptools
+pip install 'isaacsim[all,extscache]==5.1.0' --extra-index-url https://pypi.nvidia.com
+
+# flatdict==4.0.1 (required by isaaclab) has a broken setup.py that calls pkg_resources,
+# which is absent in pip's isolated build envs on modern setuptools. This script patches
+# it and pre-builds a wheel that pip will use instead of rebuilding from source.
+python - << 'EOF'
+import subprocess, sys, tarfile, textwrap, urllib.request
+from pathlib import Path
+
+src  = Path("/tmp/flatdict_src")
+whl  = Path("/tmp/flatdict_whl")
+src.mkdir(exist_ok=True)
+whl.mkdir(exist_ok=True)
+
+url = "https://files.pythonhosted.org/packages/source/f/flatdict/flatdict-4.0.1.tar.gz"
+tgz = src / "flatdict-4.0.1.tar.gz"
+print("Downloading flatdict source...")
+urllib.request.urlretrieve(url, tgz)
+
+with tarfile.open(tgz) as t:
+    t.extractall(src)
+
+(src / "flatdict-4.0.1" / "setup.py").write_text(
+    "import setuptools\nsetuptools.setup()\n"
+)
+
+print("Building patched wheel...")
+subprocess.check_call([sys.executable, "-m", "pip", "wheel",
+    str(src / "flatdict-4.0.1"), "--no-deps", "-w", str(whl)])
+print("Done:", list(whl.iterdir()))
+EOF
+
+pip install 'isaaclab[isaacsim,all]==2.3.2' --extra-index-url https://pypi.nvidia.com --find-links /tmp/flatdict_whl/
 pip install trimesh pymavlink mavsdk
 ```
 
