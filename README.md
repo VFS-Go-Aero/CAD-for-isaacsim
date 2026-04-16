@@ -179,7 +179,8 @@ git checkout sgoss/isaac-sim-import
 # Copy meshes and scripts to working directory
 mkdir -p ~/go_aero/meshes
 cp meshes/* ~/go_aero/meshes/
-cp build_scene.py open_scene.py px4_visualizer.py fly_demo.py px4_bridge.py ~/go_aero/
+cp simulation/build_scene.py simulation/open_scene.py simulation/px4_visualizer.py \
+   simulation/fly_demo.py simulation/px4_bridge.py ~/go_aero/
 
 # Build the USD scene (headless, takes ~60s)
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -253,11 +254,14 @@ asyncio.run(run())
 |------|-------------|
 | `meshes/` | STL mesh files (frame + 4 propellers) |
 | `go_aero_vehicle.urdf` | Fixed URDF (reference, not used for rendering) |
-| `build_scene.py` | Builds `vehicle_scene.usd` from STL meshes |
-| `open_scene.py` | Opens scene with optional hover controller |
-| `px4_visualizer.py` | Reads PX4 state via MAVLink, updates Isaac Sim |
-| `fly_demo.py` | MAVSDK script: takeoff, fly square, land |
-| `px4_bridge.py` | MAVLink bridge (for future HIL mode) |
+| `simulation/` | Simulation scripts + dedicated docs (see [`simulation/README.md`](./simulation/README.md)) |
+| `simulation/build_scene.py` | Builds `vehicle_scene.usd` from STL meshes |
+| `simulation/open_scene.py` | Opens scene with optional hover controller |
+| `simulation/px4_visualizer.py` | Reads PX4 state via MAVLink, updates Isaac Sim |
+| `simulation/fly_demo.py` | MAVSDK script: takeoff, fly square, land |
+| `simulation/px4_bridge.py` | MAVLink bridge (for future HIL mode) |
+| `simulation/ARCHITECTURE.md` | Process topology, data flow, coordinate frames |
+| `simulation/PX4_API.md` | MAVLink + MAVSDK reference for the simulation |
 
 ## fly_demo.py Options
 
