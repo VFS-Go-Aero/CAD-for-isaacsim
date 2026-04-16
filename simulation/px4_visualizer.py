@@ -61,6 +61,68 @@ cam.set_target_world(Gf.Vec3d(0.0, 0.0, 3.0), True)
 # Get vehicle prim for updating pose
 vehicle_prim = stage.GetPrimAtPath('/World/Vehicle')
 
+# ============================================================
+# Reset vehicle xform to use translate + orient (quaternion)
+# so we can apply PX4 attitude (roll/pitch/yaw) per frame.
+# The original scene baked in rotateX(90) for the Y-up -> Z-up
+# mesh fix; we now fold that into the orient quaternion below.
+# ============================================================
+vehicle_xformable = UsdGeom.Xformable(vehicle_prim)
+vehicle_xformable.ClearXformOpOrder()
+v_translate_op = vehicle_xformable.AddTranslateOp()
+v_orient_op = vehicle_xformable.AddOrientOp(UsdGeom.XformOp.PrecisionDouble)
+
+# Pre-computed constants for the attitude conversion.
+#
+# Coordinate frames:
+#   PX4 NED body:  +X = nose, +Y = right wing, +Z = down
+#   PX4 NED world: +X = north, +Y = east,      +Z = down
+#   Isaac Sim ENU world: +X = east, +Y = north, +Z = up
+#   Mesh local (Y-up): +X = right, +Y = up, +Z = back (so -Z = forward)
+#
+# Q_MESH_FIX:  +90 deg around X. Maps Y-up mesh to Z-up world. After this,
+#              mesh-forward (-Z) lands at world +Y (north).  Identity yaw
+#              from PX4 thus already faces north, no extra offset needed.
+# Q_NED_ENU:   180 deg around (1,1,0)/sqrt(2). Maps NED basis to ENU basis
+#              (swaps X/Y and flips Z). Used to rebase the body quaternion
+#              from NED-world reference to ENU-world reference via similarity.
+COS45 = math.sqrt(2) / 2
+Q_MESH_FIX = Gf.Quatd(COS45, Gf.Vec3d(COS45, 0.0, 0.0))
+Q_NED_ENU = Gf.Quatd(0.0, Gf.Vec3d(COS45, COS45, 0.0))
+Q_NED_ENU_INV = Q_NED_ENU.GetInverse()
+
+
+def euler_ned_to_quat(roll, pitch, yaw):
+    """PX4 NED body Tait-Bryan (Z-Y-X) euler -> rotation quaternion."""
+    cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
+    cp, sp = math.cos(pitch * 0.5), math.sin(pitch * 0.5)
+    cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
+    return Gf.Quatd(
+        cr * cp * cy + sr * sp * sy,
+        Gf.Vec3d(
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+        ),
+    )
+
+
+def attitude_to_world_quat(roll, pitch, yaw):
+    """
+    Combine PX4 NED body attitude with the NED->ENU rebase and the mesh-fix
+    rotation so the result can be set directly on xformOp:orient and produces
+    the correct visual orientation in Isaac Sim.
+    """
+    q_body_ned = euler_ned_to_quat(roll, pitch, yaw)
+    q_body_enu = Q_NED_ENU * q_body_ned * Q_NED_ENU_INV
+    return q_body_enu * Q_MESH_FIX
+
+
+# Seed initial pose: identity attitude (level, facing north) at spawn height.
+v_translate_op.Set(Gf.Vec3d(0.0, 0.0, 1.5))
+v_orient_op.Set(Q_MESH_FIX)
+
+
 # Get prop xforms for spinning
 prop_prims = {}
 for name in ['prop_fr', 'prop_fl', 'prop_rr', 'prop_rl']:
@@ -181,21 +243,12 @@ try:
             motors = vehicle_state['motors'][:]
             is_armed = vehicle_state['armed']
 
-        # Update vehicle position
-        # The vehicle Xform has translate + rotateX(90) ops from the scene build
-        # We need to set the translate to the PX4 position
-        translate_attr = vehicle_prim.GetAttribute('xformOp:translate')
-        if translate_attr:
-            # Offset so feet sit on ground (chassis center ~0.5m above feet)
-            translate_attr.Set(Gf.Vec3d(x, y, max(0.5, z + 0.5)))
+        # Update vehicle position (offset so feet sit on ground)
+        v_translate_op.Set(Gf.Vec3d(x, y, max(0.5, z + 0.5)))
 
-        # Update vehicle orientation
-        # Convert PX4 euler (NED) to Isaac Sim rotation
-        # The base rotation of +90 X converts Y-up mesh to Z-up
-        # We add PX4's attitude on top
-        # For now: apply yaw as Z rotation, pitch as Y, roll as X
-        # But we already have rotateX(90) in the xformOpOrder
-        # So we need to be careful about order
+        # Update vehicle orientation: PX4 NED body attitude -> ENU world
+        # quaternion (with mesh fix folded in). See attitude_to_world_quat above.
+        v_orient_op.Set(attitude_to_world_quat(roll, pitch, yaw))
 
         # Spin props based on motor output
         for i, name in enumerate(['prop_fr', 'prop_fl', 'prop_rr', 'prop_rl']):
