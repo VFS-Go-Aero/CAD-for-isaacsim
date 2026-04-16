@@ -14,9 +14,9 @@ A real-time visual simulation of the Go Aero quadrotor flying under PX4 autopilo
 | Mode | Physics | Use case |
 |------|---------|----------|
 | **Visualizer** (`px4_visualizer.py`) | PX4 SIH (internal) | Smooth visualization, demos, autonomy testing against PX4's generic quadrotor model |
-| **Bridge** (`px4_bridge.py`) | Isaac Sim PhysX | Hardware-In-The-Loop (HIL) — full physics, real airframe parameters (work in progress) |
+| **Bridge** (`px4_bridge.py`) | Isaac Sim PhysX | Hardware-In-The-Loop (HIL) — full physics, real airframe parameters |
 
-Most current usage is the Visualizer mode — it just mirrors PX4's internal pose into Isaac Sim, no HIL required.
+Use the Visualizer mode for quick demos and autonomy work; use the Bridge when you need PhysX to be the source of truth (airframe tuning, real motor/prop characterisation, collision and ground-effect experiments).
 
 ---
 
@@ -30,10 +30,12 @@ CAD-for-isaacsim/
 │   ├── README.md
 │   ├── ARCHITECTURE.md
 │   ├── PX4_API.md
+│   ├── _frames.py             shared NED/ENU + mesh-fix quaternion helpers
 │   ├── build_scene.py         build vehicle_scene.usd from STL meshes
 │   ├── open_scene.py          open scene with PID hover controller (no PX4)
 │   ├── px4_visualizer.py      mirror PX4 SIH pose into Isaac Sim   (default mode)
-│   ├── px4_bridge.py          full HIL bridge (sensors out, motors in)  (WIP)
+│   ├── px4_bridge.py          full HIL bridge (sensors out, motors in)
+│   ├── joystick_control.py    (Phase 2) Xbox controller → MANUAL_CONTROL to PX4
 │   └── fly_demo.py            MAVSDK script: takeoff, fly square, land
 ├── meshes/                    STL files: frame.stl, FR.stl, FL.stl, BR.stl, BL.stl
 ├── go_aero_vehicle.urdf       reference URDF (not used at runtime)
@@ -70,11 +72,23 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate env_isaaclab_jazzy
 ```
 
+### Visualizer mode (PX4 SIH physics)
+
 | Terminal | Command | Wait for |
 |---|---|---|
 | 1 — PX4 | `cd ~/PX4-Autopilot/build/px4_sitl_default && PX4_SYS_AUTOSTART=10040 PX4_SIM_MODEL=sihsim_quadx bin/px4 -d` | `Ready for takeoff!` |
 | 2 — Isaac Sim | `python ~/go_aero/px4_visualizer.py --device cuda --mavlink-port 14550` | `Visualizer running!` (~90 s) |
 | 3 — Mission | `python ~/go_aero/fly_demo.py --loops 3 --altitude 5 --size 8` | takeoff → square → land |
+
+### HIL bridge mode (Isaac Sim PhysX is the physics)
+
+| Terminal | Command | Wait for |
+|---|---|---|
+| 1 — PX4 | `cd ~/PX4-Autopilot/build/px4_sitl_default && PX4_SYS_AUTOSTART=10050 PX4_SIM_MODEL=none_go_aero bin/px4 -d` | `Waiting for simulator to connect on UDP port 4560` |
+| 2 — Bridge | `python ~/go_aero/px4_bridge.py --device cuda --px4-port 4560` | `Bridge running.` then, after EKF converges (~3 s), PX4 prints `Ready for takeoff!` |
+| 3 — Mission | `python ~/go_aero/fly_demo.py --loops 2 --altitude 5 --size 8` | takeoff → square → land |
+
+The bridge requires the `chassis_IMU` prim to exist in the USD — rebuild the scene first (`python ~/go_aero/build_scene.py --headless`) if you're upgrading from an earlier checkout.
 
 Connect a viewer with NICE DCV at `https://52.91.203.66:8443` to see the Isaac Sim viewport.
 
@@ -94,7 +108,7 @@ nano px4_visualizer.py         # or vim/code-server
 # When happy, copy back into the repo clone
 cd ~/go_aero_repo               # the cloned CAD-for-isaacsim
 git checkout sgoss/isaac-sim-import
-cp ~/go_aero/{build_scene,open_scene,px4_visualizer,px4_bridge,fly_demo}.py simulation/
+cp ~/go_aero/{build_scene,open_scene,px4_visualizer,px4_bridge,fly_demo,_frames}.py simulation/
 
 # Commit and push
 git add simulation/
@@ -156,8 +170,9 @@ Then restart the PX4 terminal.
 | `build_scene.py` | `~/go_aero/meshes/*.stl` | `~/go_aero/vehicle_scene.usd` | — |
 | `open_scene.py` | `~/go_aero/vehicle_scene.usd` | viewport | — (standalone, no PX4) |
 | `px4_visualizer.py` | USD scene + MAVLink UDP `:14550` | viewport | PX4 SIH |
-| `px4_bridge.py` | USD scene + MAVLink UDP `:14560` | UDP `:14560` (HIL_SENSOR, HIL_GPS) | PX4 SITL (HIL mode) |
+| `px4_bridge.py` | USD scene + MAVLink UDP `:4560` (bidirectional) | HIL_SENSOR / HIL_GPS out, HIL_ACTUATOR_CONTROLS in | PX4 SITL (HIL mode) |
 | `fly_demo.py` | — | MAVSDK UDP `:14540` | PX4 (offboard) |
+| `joystick_control.py` | Xbox controller (USB) | MAVLink `MANUAL_CONTROL` over UDP `:14550` | PX4 GCS endpoint |
 
 See [PX4_API.md](./PX4_API.md) for the MAVLink message and MAVSDK method details, and [ARCHITECTURE.md](./ARCHITECTURE.md) for the full data flow.
 
@@ -179,6 +194,96 @@ Edit `build_scene.py` — `mass_api.CreateMassAttr(...)`, the `props` dict (moto
 
 ### Change the camera angle
 Edit the `cam.set_position_world(...)` and `cam.set_target_world(...)` calls near the top of `px4_visualizer.py` or `open_scene.py`.
+
+---
+
+## HIL Bridge — Airframe Setup
+
+The `none_go_aero` airframe (`~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/10050_none_go_aero`) must tell PX4 it's in HIL mode and open the external-sim MAVLink socket on port 4560. The following block is what the bridge expects on the EC2 side — the file is not committed to this repo because it lives inside the PX4 checkout:
+
+```sh
+# HIL mode: simulator provides sensors, PX4 provides actuators
+param set-default SYS_HITL 1
+param set-default SENS_EN_GPSSIM 0
+param set-default SENS_EN_BAROSIM 0
+param set-default SENS_EN_MAGSIM 0
+
+# Open the bidirectional MAVLink simulator socket
+simulator_mavlink start -u 4560
+```
+
+Re-apply after a fresh PX4 checkout with:
+
+```bash
+sed -i '/^set AUTOCNF/a param set-default SYS_HITL 1\nparam set-default SENS_EN_GPSSIM 0\nparam set-default SENS_EN_BAROSIM 0\nparam set-default SENS_EN_MAGSIM 0\nsimulator_mavlink start -u 4560' \
+  ~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/10050_none_go_aero
+cd ~/PX4-Autopilot && make px4_sitl
+```
+
+The SIH visualizer mode is unaffected — it uses a different airframe (`10040_sihsim_quadx`) that leaves `SYS_HITL=0`.
+
+---
+
+## HIL Bridge — Verification
+
+After a rebuild + PX4 restart, work through these steps to confirm the loop is actually closed:
+
+1. **Rebuild scene** — `python ~/go_aero/build_scene.py --headless`. Grep the resulting USD for `chassis_IMU` to confirm the sensor prim exists.
+2. **Start PX4** — `PX4_SYS_AUTOSTART=10050 PX4_SIM_MODEL=none_go_aero bin/px4 -d`. PX4 should print `Waiting for simulator to connect on UDP port 4560` and should *not* print the SIH `Ready for takeoff!` line yet.
+3. **Start bridge** — `python ~/go_aero/px4_bridge.py --device cuda --px4-port 4560`. The bridge prints `PX4 connected. Bridge running.` once it sees the first MAVLink message; ~3 s later PX4 should print `Ready for takeoff!` (EKF converged on our sensors).
+4. **Fly offboard** — `python ~/go_aero/fly_demo.py --altitude 5 --size 8 --loops 2`. Expect the bridge's status line to show motors hovering around ~0.5–0.6 during hover, not pegged at 0 or 1. In the DCV viewport the vehicle should visibly pitch forward/back while moving.
+5. **Sanity kill** — stop the bridge mid-flight. PX4 must enter failsafe within `COM_OF_LOSS_T` seconds and print `Sensor timeout`. If it doesn't, PX4 is still using its internal SIH and the HIL airframe changes above didn't take effect.
+6. **Regression** — the old visualizer path (`px4_visualizer.py`) should still work unchanged against the SIH airframe.
+
+## Xbox Manual Flight (`joystick_control.py`)
+
+`joystick_control.py` runs on your **local Windows machine** (not on EC2) and feeds an Xbox controller's sticks into PX4 as `MANUAL_CONTROL` MAVLink messages over UDP. PX4 already binds 14550 for its default GCS instance, so no PX4-side changes are needed — just open UDP 14550 inbound on the VividCloud security group to your home IP.
+
+### Setup
+
+1. Plug Xbox controller into the Windows machine, confirm Windows sees it under *Set up USB game controllers*.
+2. `pip install pygame pymavlink`
+3. Open the EC2 security group `isaac-sim-sg` (in the VividCloud `us-east-1` account) and add an inbound UDP rule for port 14550 from your current IP (`curl ifconfig.me`). Rule source: `your.ip.here/32`.
+4. Start PX4 on EC2 (either SIH or HIL mode works):
+   ```bash
+   cd ~/PX4-Autopilot/build/px4_sitl_default
+   PX4_SYS_AUTOSTART=10040 PX4_SIM_MODEL=sihsim_quadx bin/px4 -d    # SIH path
+   # or the HIL path — also start px4_bridge.py in a second terminal
+   ```
+5. From Windows: `python simulation/joystick_control.py --ec2-ip 52.91.203.66`
+6. **A** = arm, **B** = disarm, **Y** = cycle mode (STABILIZED → ALTITUDE → POSITION), sticks = control.
+
+### Stick layout
+
+| Xbox axis | PX4 field | Range |
+|---|---|---|
+| Left stick X | roll | [-1000, 1000] |
+| Left stick Y | pitch (inverted) | [-1000, 1000] |
+| Right stick X | yaw | [-1000, 1000] |
+| Right stick Y | throttle (remapped) | [0, 1000] |
+
+5 % deadzone on each axis by default; pass `--deadzone 0.1` to widen.
+
+### Failsafe behaviour
+
+If the controller disconnects mid-flight, the pygame axes return zero and the script keeps streaming neutral sticks. If the script itself dies, PX4's `COM_RC_LOSS_T` failsafe (default 0.5 s) triggers and the autopilot auto-lands / RTLs depending on the param.
+
+On graceful shutdown (Ctrl-C) the script sends 1 s of neutral sticks followed by a disarm command, so the vehicle settles rather than latching the last stick input.
+
+---
+
+## HIL Bridge — Tuning
+
+The bridge exposes four tuning knobs at the top of `px4_bridge.py`:
+
+| Constant | Default | Notes |
+|---|---|---|
+| `MAX_THRUST_PER_MOTOR` | `2 × hover ≈ 24.5 N` | Bump to 3× hover for acro-style response |
+| `K_TAU` | `0.016 m` | Moment-per-unit-thrust. Adjust if yaw response is too soft/twitchy |
+| `ACC_NOISE_STD`, `GYRO_NOISE_STD`, ... | small | Pass `--no-noise` to disable entirely while debugging |
+| `SENSOR_RATE` | `250` Hz | Physics step rate + HIL_SENSOR send rate. Keep them equal |
+
+Inertia and mass live in `build_scene.py` — edit `mass_api.CreateMassAttr` / `CreateDiagonalInertiaAttr` and rebuild the scene.
 
 ---
 

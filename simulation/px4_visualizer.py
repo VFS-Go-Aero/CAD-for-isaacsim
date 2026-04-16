@@ -72,50 +72,10 @@ vehicle_xformable.ClearXformOpOrder()
 v_translate_op = vehicle_xformable.AddTranslateOp()
 v_orient_op = vehicle_xformable.AddOrientOp(UsdGeom.XformOp.PrecisionDouble)
 
-# Pre-computed constants for the attitude conversion.
-#
-# Coordinate frames:
-#   PX4 NED body:  +X = nose, +Y = right wing, +Z = down
-#   PX4 NED world: +X = north, +Y = east,      +Z = down
-#   Isaac Sim ENU world: +X = east, +Y = north, +Z = up
-#   Mesh local (Y-up): +X = right, +Y = up, +Z = back (so -Z = forward)
-#
-# Q_MESH_FIX:  +90 deg around X. Maps Y-up mesh to Z-up world. After this,
-#              mesh-forward (-Z) lands at world +Y (north).  Identity yaw
-#              from PX4 thus already faces north, no extra offset needed.
-# Q_NED_ENU:   180 deg around (1,1,0)/sqrt(2). Maps NED basis to ENU basis
-#              (swaps X/Y and flips Z). Used to rebase the body quaternion
-#              from NED-world reference to ENU-world reference via similarity.
-COS45 = math.sqrt(2) / 2
-Q_MESH_FIX = Gf.Quatd(COS45, Gf.Vec3d(COS45, 0.0, 0.0))
-Q_NED_ENU = Gf.Quatd(0.0, Gf.Vec3d(COS45, COS45, 0.0))
-Q_NED_ENU_INV = Q_NED_ENU.GetInverse()
-
-
-def euler_ned_to_quat(roll, pitch, yaw):
-    """PX4 NED body Tait-Bryan (Z-Y-X) euler -> rotation quaternion."""
-    cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
-    cp, sp = math.cos(pitch * 0.5), math.sin(pitch * 0.5)
-    cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
-    return Gf.Quatd(
-        cr * cp * cy + sr * sp * sy,
-        Gf.Vec3d(
-            sr * cp * cy - cr * sp * sy,
-            cr * sp * cy + sr * cp * sy,
-            cr * cp * sy - sr * sp * cy,
-        ),
-    )
-
-
-def attitude_to_world_quat(roll, pitch, yaw):
-    """
-    Combine PX4 NED body attitude with the NED->ENU rebase and the mesh-fix
-    rotation so the result can be set directly on xformOp:orient and produces
-    the correct visual orientation in Isaac Sim.
-    """
-    q_body_ned = euler_ned_to_quat(roll, pitch, yaw)
-    q_body_enu = Q_NED_ENU * q_body_ned * Q_NED_ENU_INV
-    return q_body_enu * Q_MESH_FIX
+# Attitude conversion helpers shared with px4_bridge.py.
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _frames import Q_MESH_FIX, attitude_to_world_quat  # noqa: E402
 
 
 # Seed initial pose: identity attitude (level, facing north) at spawn height.

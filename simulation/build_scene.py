@@ -100,14 +100,31 @@ UsdPhysics.RigidBodyAPI.Apply(chassis_prim)
 mass_api = UsdPhysics.MassAPI.Apply(chassis_prim)
 mass_api.CreateMassAttr(5.0)  # 5 kg drone
 mass_api.CreateCenterOfMassAttr(Gf.Vec3f(0, -0.1, 0))  # slightly below center
+# Diagonal inertia tensor for a 5 kg, roughly 1 m x 1 m x 0.3 m airframe.
+# Approximating as a thin plate: Ixx = Iyy ~= (1/12) m (w^2 + h^2),
+# Izz ~= (1/12) m (w^2 + d^2). Values chosen round and slightly conservative
+# so PX4's attitude loop converges quickly; tune against real vehicle later.
+mass_api.CreateDiagonalInertiaAttr(Gf.Vec3f(0.5, 0.5, 0.8))
 
-# Box collider for chassis (simplified)
+# Box collider for chassis (simplified). Scale is in the mesh Y-up frame, so
+# (X, Y, Z) ~ (width, height, depth). Keep it conservative - slightly smaller
+# than the visual hull so props and arms never clip into it.
 collider = UsdGeom.Cube.Define(stage, '/World/Vehicle/chassis/collider')
 collider.CreateSizeAttr(1.0)
-collider.AddScaleOp().Set(Gf.Vec3f(1.0, 0.3, 1.1))
+collider.AddScaleOp().Set(Gf.Vec3f(0.9, 0.25, 1.0))
 collider.AddTranslateOp().Set(Gf.Vec3d(0, -0.15, 0))
 UsdPhysics.CollisionAPI.Apply(collider.GetPrim())
 collider.GetPurposeAttr().Set('guide')  # invisible collider
+
+# ============================================================
+# IMU mount point — child Xform of the chassis rigid body.
+# The IsaacLab IMU sensor reads root body state via this prim, so it must
+# live under the chassis. Orientation matches the chassis body frame (after
+# the vehicle's RotateXOp(90)), so sensor outputs are already in FRD-ish
+# body frame. px4_bridge.py attaches the IMUSensor at runtime.
+# ============================================================
+imu_xform = UsdGeom.Xform.Define(stage, '/World/Vehicle/chassis/chassis_IMU')
+imu_xform.AddTranslateOp().Set(Gf.Vec3d(0, 0, 0))
 
 # ============================================================
 # Propellers — revolute joints with velocity drives

@@ -22,9 +22,9 @@ PX4's built-in **Simulation-In-Hardware (SIH)** module simulates the entire vehi
 
 **Properties:** No physics in Isaac Sim. Visualization only. PX4's generic quadrotor model handles dynamics, EKF, controller — all internally.
 
-### Mode 2 — Isaac Sim PhysX + PX4 SITL HIL  *(work in progress, `px4_bridge.py`)*
+### Mode 2 — Isaac Sim PhysX + PX4 SITL HIL  *(`px4_bridge.py`)*
 
-Isaac Sim is the source of truth for physics. It simulates IMU/GPS/baro/mag, sends them to PX4 over the MAVLink **HIL_SENSOR** / **HIL_GPS** path, and applies PX4's motor commands as physical forces in the scene.
+Isaac Sim is the source of truth for physics. It simulates IMU/GPS/baro/mag from an `IMUSensor` attached to the chassis rigid body plus velocity/position from the same rigid body, sends them to PX4 over the MAVLink **HIL_SENSOR** / **HIL_GPS** path, and applies PX4's motor commands as per-prop thrust forces and a net yaw torque on the chassis.
 
 ```
  ┌──────────────────────┐                                      ┌──────────────────────┐
@@ -32,14 +32,16 @@ Isaac Sim is the source of truth for physics. It simulates IMU/GPS/baro/mag, sen
  │   (Isaac Sim PhysX)  │   HIL_GPS     (10 Hz)                │   PX4 SITL           │
  │   ──────────────     ├─────────────────────────────────────►│   (none_go_aero)     │
  │   - rigid bodies     │   HEARTBEAT   (1 Hz)                 │   ──────────────     │
- │   - PhysX            │       UDP 14560                      │   - EKF              │
- │   - sensor sim       │                                      │   - controller       │
- │   - motor force      │◄─────────────────────────────────────┤                      │
- │     application      │   HIL_ACTUATOR_CONTROLS (motor cmds) │                      │
+ │   - PhysX @ 250 Hz   │                                      │   - EKF              │
+ │   - IMUSensor        │       UDP 4560 (bidirectional)       │   - controller       │
+ │   - force + torque   │◄─────────────────────────────────────┤   - mixer            │
+ │     on chassis       │   HIL_ACTUATOR_CONTROLS (motor cmds) │                      │
  └──────────────────────┘                                      └──────────────────────┘
 ```
 
-**Properties:** Real airframe parameters (mass, motor placement, prop characteristics) drive dynamics. Required for tuning autopilot for the actual Go Aero airframe.
+PX4's `simulator_mavlink` module is the one that opens the connection — it connects *out* to the bridge's listening socket. The bridge uses a single `udpin:0.0.0.0:4560` pymavlink connection for both directions.
+
+**Properties:** Real airframe parameters (mass, inertia tensor, motor placement, prop characteristics) drive dynamics. Required for tuning the autopilot against the actual Go Aero airframe.
 
 ---
 
@@ -47,12 +49,15 @@ Isaac Sim is the source of truth for physics. It simulates IMU/GPS/baro/mag, sen
 
 | Process | Conda env? | GPU? | Network |
 |---|---|---|---|
-| `bin/px4 -d` (PX4 SITL) | No | No | binds UDP 14550 (MAVLink), 14540 (MAVSDK), 14560 (HIL) |
+| `bin/px4 -d` (PX4 SITL) | No | No | binds UDP 14550 (MAVLink GCS), 14540 (MAVSDK offboard); HIL mode additionally dials out to the bridge on 4560 |
 | `python px4_visualizer.py` | **yes** (`env_isaaclab_jazzy`) | **yes** (`--device cuda`) | binds UDP 14550 input |
 | `python fly_demo.py` | **yes** (`env_isaaclab_jazzy`) | No | binds UDP 14540 input |
-| `python px4_bridge.py` | **yes** (`env_isaaclab_jazzy`) | **yes** | UDP 14560 in/out |
+| `python px4_bridge.py` | **yes** (`env_isaaclab_jazzy`) | **yes** | binds UDP 4560 (bidirectional; PX4 connects in) |
+| `python joystick_control.py` *(Phase 2, local Windows machine)* | No | No | sends UDP to EC2:14550 |
 
-PX4 must start *before* the visualizer/bridge so the sockets are open when the viewer first connects. MAVSDK clients (`fly_demo.py`) can start any time after PX4.
+For the **Visualizer** path: PX4 must start first so its MAVLink output is already publishing to 14550 when the visualizer binds. MAVSDK clients (`fly_demo.py`) can start any time after PX4.
+
+For the **HIL Bridge** path: start order is **bridge first, PX4 second**. PX4's `simulator_mavlink` module connects out to the bridge's listening socket; if the bridge isn't up yet, PX4 prints `Waiting for simulator to connect…` and halts sensor wiring until it sees us.
 
 ---
 
@@ -143,16 +148,31 @@ Uses **MAVSDK-Python** (high-level async API). Connects to PX4 on UDP 14540, run
 
 **Why offboard mode and not a mission upload?** Offboard gives smooth real-time control (good for visualization). For real autonomous testing later you'd switch to `mission` mode with uploaded waypoints.
 
-### `px4_bridge.py`  *(HIL — work in progress)*
+### `px4_bridge.py`  *(HIL — closed loop)*
 
-The full HIL bridge (vs. the visualizer's read-only mode). Two threads, same shape as the visualizer, but the data flows the *other* way: Isaac Sim is the source of truth.
+The full HIL bridge. Two threads, same shape as the visualizer, but the data flows the *other* way: Isaac Sim is the source of truth.
 
-Periodic sender in main loop:
-- `HIL_SENSOR` at 250 Hz (`SENSOR_RATE`) — IMU + baro + mag
-- `HIL_GPS` at 10 Hz (`GPS_RATE`)
-- `HEARTBEAT` at 1 Hz
+**Receiver thread** — drains the single bidirectional `udpin:0.0.0.0:4560` connection:
+- `HIL_ACTUATOR_CONTROLS` → clamps 4 motor commands into `motor_commands[]` under a `threading.Lock`
+- `HEARTBEAT` → updates `armed` from `MAV_MODE_FLAG_SAFETY_ARMED`
 
-Receiver thread parses `HIL_ACTUATOR_CONTROLS` from PX4 and stores 4 normalized motor commands. The main loop should apply these as forces on the prop rigid bodies — **this is the WIP part**: currently the bridge sends sensors but doesn't yet apply motor forces back into PhysX. See *Next Steps* in the [root README](../README.md#next-steps-for-accurate-simulation).
+**Main / physics loop** — one `app.update()` per PhysX tick at `SENSOR_RATE` (250 Hz):
+1. `chassis.get_world_pose()` and `chassis.get_linear_velocity()` — ENU world pose and velocity
+2. `imu.get_current_frame()` — mesh-body-frame `lin_acc` (with gravity) and `ang_vel`
+3. Build the sensor packet:
+   - Accelerometer + gyro: convert mesh-body → FRD via `mesh_body_to_frd()`
+   - Magnetometer: rotate the NED world field `B_WORLD_NED` into the mesh-body frame via the chassis quaternion's conjugate, then FRD-convert
+   - Barometer: ISA altitude formula on `pos.z + HOME_ALT`
+4. `hil_sensor_send(fields_updated=0x1FFF)` — all 13 fields
+5. `hil_gps_send(…)` at 10 Hz with converted ENU→NED velocity (cm/s)
+6. `heartbeat_send(MAV_TYPE_GENERIC)` at 1 Hz
+7. Read the latest clamped motor commands, compute body-frame thrust `F_body += (0, T_i, 0)`, cross-product moment `M_body += r_body × F_i`, and reaction yaw `M_body.y -= K_TAU * T_i * spin_dir`
+8. Rotate body-frame force/torque into world frame with the chassis quaternion and push via `chassis.apply_forces_and_torques_at_pos(is_global=True, positions=None)`
+9. Separately set each prop joint's `DriveAPI:angular` target velocity for the visual spin — decoupled from the force model so joint behaviour doesn't bleed into flight dynamics
+
+Timing: MAVLink timestamps use `timeline.get_current_time()` (sim seconds) rather than wall-clock so the sensor stream stays consistent even when the viewport stutters. The bridge blocks on `px4_connected.wait()` before the first sensor packet is sent — this is the "connect-ready gate" that replaces `wait_heartbeat()`.
+
+Frame conversions are centralised in `_frames.py` (shared with the visualizer).
 
 ---
 
@@ -161,8 +181,8 @@ Receiver thread parses `HIL_ACTUATOR_CONTROLS` from PX4 and stores 4 normalized 
 | Port | Direction | Protocol | Used by |
 |---|---|---|---|
 | 14540 | PX4 → MAVSDK clients | UDP | `fly_demo.py` listens, PX4 publishes |
-| 14550 | PX4 → ground stations | UDP | `px4_visualizer.py` listens, PX4 publishes |
-| 14560 | bidirectional | UDP | `px4_bridge.py` ↔ PX4 (HIL mode only) |
+| 14550 | PX4 ↔ ground stations | UDP | `px4_visualizer.py` listens, PX4 publishes; `joystick_control.py` sends `MANUAL_CONTROL` in |
+| 4560 | bidirectional | UDP | `px4_bridge.py` binds and listens, PX4's `simulator_mavlink` dials out to it (HIL mode only) |
 | 8443 | DCV remote desktop | TCP/TLS | NICE DCV viewer ↔ EC2 |
 | 22 | SSH | TCP | terminal access |
 
@@ -172,14 +192,17 @@ PX4's default SITL config opens 14540 + 14550 simultaneously, so MAVSDK and the 
 
 ## Threading & Timing
 
-The visualizer's main loop runs as fast as Isaac Sim updates (~60 fps). MAVLink messages arrive on a background thread and just write into a dict — they're never blocked by the renderer. The lock is held only for the snapshot copy in the main loop, so contention is minimal.
+**Visualizer mode.** The main loop runs as fast as Isaac Sim updates (~60 fps). MAVLink messages arrive on a background thread and just write into a dict — they're never blocked by the renderer. The lock is held only for the snapshot copy in the main loop, so contention is minimal. PX4 SIH internally runs at 1 kHz. The 50 Hz data stream we request gives us ~17 ms-old pose data on average — fine for visualization.
 
-PX4 SIH internally runs at 1 kHz. The 50 Hz data stream we request gives us ~17 ms-old pose data on average — fine for visualization.
+**HIL bridge mode.** The main loop is the physics loop — each `app.update()` call advances PhysX by `1/SENSOR_RATE = 4 ms`. Sensor packets are sent every physics tick (250 Hz); GPS every 25 ticks; heartbeats every 250 ticks. The receiver thread is a thin drain loop: `recv_match(blocking=True, timeout=1.0)` → write into `motor_commands[]` under a `threading.Lock`. The main loop snapshots the list once per tick so lock contention is one short copy per 4 ms.
+
+Viewport rendering is decoupled from physics: `--render-hz` (default 30) throttles how often the main loop forces a viewport refresh. Physics never waits on rendering.
 
 If you see jittery motion, check:
-1. The data stream rate is actually being sent (`request_data_stream_send` succeeded)
+1. Visualizer: the data stream rate is actually being sent (`request_data_stream_send` succeeded)
 2. The conda env didn't get the wrong pymavlink (only the one in `env_isaaclab_jazzy` should be active)
-3. Isaac Sim's actual frame rate via `step % 300 == 0` log line
+3. Isaac Sim's actual frame rate via the `[INFO] t=…` status line (bridge) or `step % 300 == 0` (visualizer)
+4. HIL only: PX4 is not *also* trying to drive its own simulator — `SYS_HITL=1` and `SENS_EN_{GPSSIM,BAROSIM,MAGSIM}=0` in the airframe file must be set
 
 ---
 
