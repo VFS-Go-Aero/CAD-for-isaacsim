@@ -84,8 +84,8 @@ conda activate env_isaaclab_jazzy
 
 | Terminal | Command | Wait for |
 |---|---|---|
-| 1 — PX4 | `cd ~/PX4-Autopilot/build/px4_sitl_default && PX4_SYS_AUTOSTART=10050 PX4_SIM_MODEL=none_go_aero bin/px4 -d` | `Waiting for simulator to connect on UDP port 4560` |
-| 2 — Bridge | `python ~/go_aero/px4_bridge.py --device cuda --px4-port 4560` | `Bridge running.` then, after EKF converges (~3 s), PX4 prints `Ready for takeoff!` |
+| 1 — Bridge | `python ~/go_aero/px4_bridge.py --device cuda --px4-port 4560` | `Waiting for PX4 on TCP 4560...` |
+| 2 — PX4 | `cd ~/PX4-Autopilot/build/px4_sitl_default && PX4_SYS_AUTOSTART=10050 PX4_SIM_MODEL=none_go_aero bin/px4 -d` | bridge prints `PX4 connected. Bridge running.`; PX4 then prints `Ready for takeoff!` after EKF converges (~3 s) |
 | 3 — Mission | `python ~/go_aero/fly_demo.py --loops 2 --altitude 5 --size 8` | takeoff → square → land |
 
 The bridge requires the `chassis_IMU` prim to exist in the USD — rebuild the scene first (`python ~/go_aero/build_scene.py --headless`) if you're upgrading from an earlier checkout.
@@ -199,7 +199,7 @@ Edit the `cam.set_position_world(...)` and `cam.set_target_world(...)` calls nea
 
 ## HIL Bridge — Airframe Setup
 
-The `none_go_aero` airframe (`~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/10050_none_go_aero`) must tell PX4 it's in HIL mode and open the external-sim MAVLink socket on port 4560. The following block is what the bridge expects on the EC2 side — the file is not committed to this repo because it lives inside the PX4 checkout:
+The `none_go_aero` airframe (`~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/10050_none_go_aero`) must tell PX4 to run in HIL mode and disable its internal sensor sims. The PX4 rc script `px4-rc.mavlinksim` already starts `simulator_mavlink` on TCP port 4560 when `PX4_SIM_MODEL` is not `sihsim`/`gz`, so no extra `simulator_mavlink` line is needed — we just need the param flips:
 
 ```sh
 # HIL mode: simulator provides sensors, PX4 provides actuators
@@ -207,18 +207,17 @@ param set-default SYS_HITL 1
 param set-default SENS_EN_GPSSIM 0
 param set-default SENS_EN_BAROSIM 0
 param set-default SENS_EN_MAGSIM 0
-
-# Open the bidirectional MAVLink simulator socket
-simulator_mavlink start -u 4560
 ```
 
 Re-apply after a fresh PX4 checkout with:
 
 ```bash
-sed -i '/^set AUTOCNF/a param set-default SYS_HITL 1\nparam set-default SENS_EN_GPSSIM 0\nparam set-default SENS_EN_BAROSIM 0\nparam set-default SENS_EN_MAGSIM 0\nsimulator_mavlink start -u 4560' \
+sed -i '/^set AUTOCNF/a param set-default SYS_HITL 1\nparam set-default SENS_EN_GPSSIM 0\nparam set-default SENS_EN_BAROSIM 0\nparam set-default SENS_EN_MAGSIM 0' \
   ~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/10050_none_go_aero
 cd ~/PX4-Autopilot && make px4_sitl
 ```
+
+The bridge defaults to `--protocol tcp` to match PX4's out-of-the-box TCP client. If you patch `px4-rc.mavlinksim` to launch `simulator_mavlink` with `-u`, also pass `--protocol udp` to the bridge.
 
 The SIH visualizer mode is unaffected — it uses a different airframe (`10040_sihsim_quadx`) that leaves `SYS_HITL=0`.
 
@@ -229,8 +228,8 @@ The SIH visualizer mode is unaffected — it uses a different airframe (`10040_s
 After a rebuild + PX4 restart, work through these steps to confirm the loop is actually closed:
 
 1. **Rebuild scene** — `python ~/go_aero/build_scene.py --headless`. Grep the resulting USD for `chassis_IMU` to confirm the sensor prim exists.
-2. **Start PX4** — `PX4_SYS_AUTOSTART=10050 PX4_SIM_MODEL=none_go_aero bin/px4 -d`. PX4 should print `Waiting for simulator to connect on UDP port 4560` and should *not* print the SIH `Ready for takeoff!` line yet.
-3. **Start bridge** — `python ~/go_aero/px4_bridge.py --device cuda --px4-port 4560`. The bridge prints `PX4 connected. Bridge running.` once it sees the first MAVLink message; ~3 s later PX4 should print `Ready for takeoff!` (EKF converged on our sensors).
+2. **Start bridge first** — `python ~/go_aero/px4_bridge.py --device cuda --px4-port 4560`. The bridge binds the TCP port and prints `Waiting for PX4 on TCP 4560...`. It must be up before PX4, because PX4's `simulator_mavlink` is the TCP *client*.
+3. **Start PX4** — `PX4_SYS_AUTOSTART=10050 PX4_SIM_MODEL=none_go_aero bin/px4 -d`. PX4 connects into the bridge; the bridge prints `PX4 connected. Bridge running.` and ~3 s later PX4 prints `Ready for takeoff!` (EKF converged on our sensors).
 4. **Fly offboard** — `python ~/go_aero/fly_demo.py --altitude 5 --size 8 --loops 2`. Expect the bridge's status line to show motors hovering around ~0.5–0.6 during hover, not pegged at 0 or 1. In the DCV viewport the vehicle should visibly pitch forward/back while moving.
 5. **Sanity kill** — stop the bridge mid-flight. PX4 must enter failsafe within `COM_OF_LOSS_T` seconds and print `Sensor timeout`. If it doesn't, PX4 is still using its internal SIH and the HIL airframe changes above didn't take effect.
 6. **Regression** — the old visualizer path (`px4_visualizer.py`) should still work unchanged against the SIH airframe.

@@ -11,9 +11,11 @@ Isaac Sim owns the physics. Each sim step:
      rigid body, and drives the visual prop joints at a speed proportional
      to the motor command.
 
-PX4's simulator_mavlink module connects *in* to our UDP socket and both
-sends and receives on that one connection. Default port is 4560 to match
-PX4's SITL default.
+PX4's simulator_mavlink module connects *in* to our socket (TCP by default,
+matching PX4's `simulator_mavlink start -c <port>` in px4-rc.mavlinksim).
+Both directions flow over that one connection. Default port is 4560 to
+match PX4's SITL default. Pass --protocol udp if you've patched the PX4
+rc file to launch the simulator link with -u instead.
 
 Usage (on EC2):
   1. Rebuild the scene (includes the chassis_IMU prim):
@@ -44,7 +46,12 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--px4-port', type=int, default=4560,
-                    help='UDP port the PX4 simulator module connects to (default 4560)')
+                    help='Port the PX4 simulator module connects to (default 4560)')
+parser.add_argument('--protocol', choices=('tcp', 'udp'), default='tcp',
+                    help='Transport for the PX4 simulator link. PX4 defaults to '
+                         'TCP (client) with simulator_mavlink -c / -h, so we run '
+                         'as a TCP server. Use --protocol udp if you have patched '
+                         'px4-rc.mavlinksim to use -u.')
 parser.add_argument('--bind-host', type=str, default='0.0.0.0',
                     help='Interface to bind to (default 0.0.0.0, all)')
 parser.add_argument('--render-hz', type=float, default=30.0,
@@ -231,13 +238,23 @@ for name in PROP_LAYOUT:
         prop_drives[name] = UsdPhysics.DriveAPI.Get(joint, 'angular')
 
 # ============================================================
-# MAVLink — single bidirectional UDP socket
+# MAVLink — single bidirectional socket
 # ============================================================
-print(f'[INFO] Binding MAVLink UDP on {args.bind_host}:{args.px4_port}...', flush=True)
-# 'udpin' binds and listens; pymavlink auto-replies to the last sender, so
-# this single connection handles both directions. PX4 connects *in* to us.
+# PX4's simulator_mavlink defaults to TCP (client), connecting out to the
+# simulator on port 4560 — see PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/
+# px4-rc.mavlinksim ("simulator_mavlink start -c $simulator_tcp_port").
+# We therefore default to 'tcpin' (TCP server) so PX4 works out of the box.
+# 'udp' is supported for the case where the user has patched the rc file to
+# launch simulator_mavlink with -u instead; pymavlink's udpin auto-replies
+# to the last sender, so both directions still flow on one socket.
+if args.protocol == 'tcp':
+    mav_url = f'tcpin:{args.bind_host}:{args.px4_port}'
+else:
+    mav_url = f'udpin:{args.bind_host}:{args.px4_port}'
+print(f'[INFO] Binding MAVLink {args.protocol.upper()} on '
+      f'{args.bind_host}:{args.px4_port}...', flush=True)
 mav = mavutil.mavlink_connection(
-    f'udpin:{args.bind_host}:{args.px4_port}',
+    mav_url,
     source_system=SOURCE_SYSTEM,
     source_component=SOURCE_COMPONENT,
 )
@@ -307,7 +324,7 @@ for _ in range(30):
 chassis.initialize()
 imu.initialize()
 
-print(f'[INFO] Waiting for PX4 on UDP {args.px4_port}...', flush=True)
+print(f'[INFO] Waiting for PX4 on {args.protocol.upper()} {args.px4_port}...', flush=True)
 print(
     '[INFO]   Start PX4: cd ~/PX4-Autopilot/build/px4_sitl_default && '
     'PX4_SYS_AUTOSTART=10050 PX4_SIM_MODEL=none_go_aero bin/px4 -d',

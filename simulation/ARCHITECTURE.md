@@ -33,13 +33,13 @@ Isaac Sim is the source of truth for physics. It simulates IMU/GPS/baro/mag from
  │   ──────────────     ├─────────────────────────────────────►│   (none_go_aero)     │
  │   - rigid bodies     │   HEARTBEAT   (1 Hz)                 │   ──────────────     │
  │   - PhysX @ 250 Hz   │                                      │   - EKF              │
- │   - IMUSensor        │       UDP 4560 (bidirectional)       │   - controller       │
+ │   - IMUSensor        │       TCP 4560 (bidirectional)       │   - controller       │
  │   - force + torque   │◄─────────────────────────────────────┤   - mixer            │
  │     on chassis       │   HIL_ACTUATOR_CONTROLS (motor cmds) │                      │
  └──────────────────────┘                                      └──────────────────────┘
 ```
 
-PX4's `simulator_mavlink` module is the one that opens the connection — it connects *out* to the bridge's listening socket. The bridge uses a single `udpin:0.0.0.0:4560` pymavlink connection for both directions.
+PX4's `simulator_mavlink` module is the one that opens the connection — it's the TCP *client* (default) and dials out to the bridge's listening socket. The bridge uses a single `tcpin:0.0.0.0:4560` pymavlink connection for both directions. Pass `--protocol udp` to the bridge (and patch `px4-rc.mavlinksim` to use `-u`) if you'd rather run UDP.
 
 **Properties:** Real airframe parameters (mass, inertia tensor, motor placement, prop characteristics) drive dynamics. Required for tuning the autopilot against the actual Go Aero airframe.
 
@@ -49,10 +49,10 @@ PX4's `simulator_mavlink` module is the one that opens the connection — it con
 
 | Process | Conda env? | GPU? | Network |
 |---|---|---|---|
-| `bin/px4 -d` (PX4 SITL) | No | No | binds UDP 14550 (MAVLink GCS), 14540 (MAVSDK offboard); HIL mode additionally dials out to the bridge on 4560 |
+| `bin/px4 -d` (PX4 SITL) | No | No | binds UDP 14550 (MAVLink GCS), 14540 (MAVSDK offboard); HIL mode additionally dials out to the bridge on TCP 4560 |
 | `python px4_visualizer.py` | **yes** (`env_isaaclab_jazzy`) | **yes** (`--device cuda`) | binds UDP 14550 input |
 | `python fly_demo.py` | **yes** (`env_isaaclab_jazzy`) | No | binds UDP 14540 input |
-| `python px4_bridge.py` | **yes** (`env_isaaclab_jazzy`) | **yes** | binds UDP 4560 (bidirectional; PX4 connects in) |
+| `python px4_bridge.py` | **yes** (`env_isaaclab_jazzy`) | **yes** | binds TCP 4560 (bidirectional; PX4 connects in) |
 | `python joystick_control.py` *(Phase 2, local Windows machine)* | No | No | sends UDP to EC2:14550 |
 
 For the **Visualizer** path: PX4 must start first so its MAVLink output is already publishing to 14550 when the visualizer binds. MAVSDK clients (`fly_demo.py`) can start any time after PX4.
@@ -152,7 +152,7 @@ Uses **MAVSDK-Python** (high-level async API). Connects to PX4 on UDP 14540, run
 
 The full HIL bridge. Two threads, same shape as the visualizer, but the data flows the *other* way: Isaac Sim is the source of truth.
 
-**Receiver thread** — drains the single bidirectional `udpin:0.0.0.0:4560` connection:
+**Receiver thread** — drains the single bidirectional `tcpin:0.0.0.0:4560` connection (or `udpin:` if `--protocol udp`):
 - `HIL_ACTUATOR_CONTROLS` → clamps 4 motor commands into `motor_commands[]` under a `threading.Lock`
 - `HEARTBEAT` → updates `armed` from `MAV_MODE_FLAG_SAFETY_ARMED`
 
@@ -182,7 +182,7 @@ Frame conversions are centralised in `_frames.py` (shared with the visualizer).
 |---|---|---|---|
 | 14540 | PX4 → MAVSDK clients | UDP | `fly_demo.py` listens, PX4 publishes |
 | 14550 | PX4 ↔ ground stations | UDP | `px4_visualizer.py` listens, PX4 publishes; `joystick_control.py` sends `MANUAL_CONTROL` in |
-| 4560 | bidirectional | UDP | `px4_bridge.py` binds and listens, PX4's `simulator_mavlink` dials out to it (HIL mode only) |
+| 4560 | bidirectional | TCP (default) or UDP | `px4_bridge.py` binds and listens, PX4's `simulator_mavlink` dials out to it (HIL mode only). TCP is PX4's default transport; use `--protocol udp` if you patch `px4-rc.mavlinksim` |
 | 8443 | DCV remote desktop | TCP/TLS | NICE DCV viewer ↔ EC2 |
 | 22 | SSH | TCP | terminal access |
 
