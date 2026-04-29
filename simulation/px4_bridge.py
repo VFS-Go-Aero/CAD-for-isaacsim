@@ -58,6 +58,8 @@ parser.add_argument('--render-hz', type=float, default=30.0,
                     help='Viewport render rate (physics still runs at 250 Hz)')
 parser.add_argument('--no-noise', action='store_true',
                     help='Disable Gaussian sensor noise (useful for debugging)')
+parser.add_argument('--lidar', action='store_true',
+                    help='Attach a downward-facing RTX LiDAR under prop_fr')
 args = parser.parse_args()
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
@@ -324,6 +326,44 @@ for _ in range(30):
 chassis.initialize()
 imu.initialize()
 
+# ============================================================
+# Optional RTX LiDAR sensor (--lidar flag)
+# ============================================================
+lidar_annotator = None
+LIDAR_READ_INTERVAL = 25  # read every 25 physics steps (~10 Hz at 250 Hz)
+
+if args.lidar:
+    import omni.kit.commands
+    import omni.replicator.core as rep
+
+    result, lidar_prim = omni.kit.commands.execute(
+        'IsaacSensorCreateRtxLidar',
+        path='/lidar_sensor',
+        parent='/World/Vehicle/prop_fr/lidar_mount',
+        config='Example_Rotary',
+        translation=(0, 0, 0),
+        orientation=Gf.Quatd(1, 0, 0, 0),
+    )
+
+    # Hydra texture for the LiDAR render product
+    hydra_texture = rep.create.render_product(
+        '/World/Vehicle/prop_fr/lidar_mount/lidar_sensor',
+        resolution=(1, 1),
+    )
+
+    # Annotator that delivers point cloud data on the CPU
+    lidar_annotator = rep.AnnotatorRegistry.get_annotator(
+        'RtxSensorCpuIsaacCreateRTXLidarScanBuffer'
+    )
+    lidar_annotator.attach([hydra_texture])
+
+    # Let the LiDAR render pipeline warm up
+    for _ in range(10):
+        app.update()
+
+    print('[INFO] RTX LiDAR attached at /World/Vehicle/prop_fr/lidar_mount/lidar_sensor',
+          flush=True)
+
 print(f'[INFO] Waiting for PX4 on {args.protocol.upper()} {args.px4_port}...', flush=True)
 print(
     '[INFO]   Start PX4: cd ~/PX4-Autopilot/build/px4_sitl_default && '
@@ -512,6 +552,27 @@ try:
             positions=None,           # apply at COM -> pure force + moment
             is_global=True,
         )
+
+        # --------------------------------------------------
+        # LiDAR point cloud read (optional)
+        # --------------------------------------------------
+        if lidar_annotator is not None and step % LIDAR_READ_INTERVAL == 0:
+            try:
+                buf = lidar_annotator.get_data()
+                if buf is not None and 'data' in buf:
+                    pts = np.array(buf['data']).reshape(-1, 3)
+                    if pts.shape[0] > 0:
+                        dists = np.linalg.norm(pts, axis=1)
+                        min_dist = float(np.min(dists))
+                        if step % (SENSOR_RATE * 2) == 0:
+                            print(
+                                f'[LIDAR] points={pts.shape[0]}  '
+                                f'min_dist={min_dist:.2f}m',
+                                flush=True,
+                            )
+            except Exception as e:
+                if step % (SENSOR_RATE * 2) == 0:
+                    print(f'[LIDAR] read error: {e}', flush=True)
 
         # --------------------------------------------------
         # Status log
