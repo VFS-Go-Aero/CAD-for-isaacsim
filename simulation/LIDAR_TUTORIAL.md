@@ -152,7 +152,7 @@ import omni.replicator.core as rep
 hydra_texture = rep.create.render_product(lidar_prim_path, resolution=(1, 1))
 
 lidar_annotator = rep.AnnotatorRegistry.get_annotator(
-    'RtxSensorCpuIsaacCreateRTXLidarScanBuffer'
+    'IsaacCreateRTXLidarScanBuffer'
 )
 lidar_annotator.attach([hydra_texture])
 ```

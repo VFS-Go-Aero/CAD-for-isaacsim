@@ -77,6 +77,10 @@ parser.add_argument('--lidar-config', type=str, default='Example_Rotary',
                     help='LiDAR configuration preset (default: Example_Rotary)')
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+# RTX LiDAR requires the rendering pipeline, even in headless mode.
+# Setting enable_cameras tells AppLauncher to load the headless.rendering
+# experience file instead of the plain headless one.
+args.enable_cameras = True
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
@@ -108,10 +112,14 @@ stage = omni.usd.get_context().get_stage()
 print('[TUTORIAL] Scene loaded.', flush=True)
 
 # Set up the camera so we can see the drone from a nice angle.
-from omni.kit.viewport.utility.camera_state import ViewportCameraState
-cam = ViewportCameraState('/OmniverseKit_Persp')
-cam.set_position_world(Gf.Vec3d(4.0, -4.0, 3.0), True)
-cam.set_target_world(Gf.Vec3d(0.0, 0.0, 1.5), True)
+# (Not available in --headless mode, so we guard the import.)
+try:
+    from omni.kit.viewport.utility.camera_state import ViewportCameraState
+    cam = ViewportCameraState('/OmniverseKit_Persp')
+    cam.set_position_world(Gf.Vec3d(4.0, -4.0, 3.0), True)
+    cam.set_target_world(Gf.Vec3d(0.0, 0.0, 1.5), True)
+except (ImportError, ModuleNotFoundError):
+    pass  # headless — no viewport
 
 
 # ============================================================
@@ -133,6 +141,15 @@ cam.set_target_world(Gf.Vec3d(0.0, 0.0, 1.5), True)
 print('[TUTORIAL] Creating RTX LiDAR sensor...', flush=True)
 
 import omni.kit.commands
+
+# The RTX LiDAR command lives in the isaacsim.sensors.rtx extension.
+# IsaacLab's headless experience files don't load it by default, so we
+# enable it explicitly. The extension manager loads it asynchronously;
+# we tick a few frames to let it finish registering its commands.
+ext_manager = omni.kit.app.get_app().get_extension_manager()
+ext_manager.set_extension_enabled_immediate('isaacsim.sensors.rtx', True)
+for _ in range(10):
+    app.update()
 
 result, lidar_prim = omni.kit.commands.execute(
     'IsaacSensorCreateRtxLidar',
@@ -182,7 +199,7 @@ print(f'[TUTORIAL] Config: {args.lidar_config}', flush=True)
 #      raw render product and converts it into structured data (like
 #      a NumPy array of 3D points) that we can use in Python.
 #
-# The annotator we use is 'RtxSensorCpuIsaacCreateRTXLidarScanBuffer'.
+# The annotator we use is 'IsaacCreateRTXLidarScanBuffer'.
 # It gives us the full point cloud as an array of (x, y, z) points
 # in the sensor's local frame.
 
@@ -197,7 +214,7 @@ hydra_texture = rep.create.render_product(lidar_prim_path, resolution=(1, 1))
 
 # Create and attach the point cloud annotator.
 lidar_annotator = rep.AnnotatorRegistry.get_annotator(
-    'RtxSensorCpuIsaacCreateRTXLidarScanBuffer'
+    'IsaacCreateRTXLidarScanBuffer'
 )
 lidar_annotator.attach([hydra_texture])
 

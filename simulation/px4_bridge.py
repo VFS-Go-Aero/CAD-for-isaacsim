@@ -336,6 +336,12 @@ if args.lidar:
     import omni.kit.commands
     import omni.replicator.core as rep
 
+    # Enable the RTX sensor extension (not loaded by default in headless).
+    ext_manager = omni.kit.app.get_app().get_extension_manager()
+    ext_manager.set_extension_enabled_immediate('isaacsim.sensors.rtx', True)
+    for _ in range(10):
+        app.update()
+
     result, lidar_prim = omni.kit.commands.execute(
         'IsaacSensorCreateRtxLidar',
         path='/lidar_sensor',
@@ -353,7 +359,7 @@ if args.lidar:
 
     # Annotator that delivers point cloud data on the CPU
     lidar_annotator = rep.AnnotatorRegistry.get_annotator(
-        'RtxSensorCpuIsaacCreateRTXLidarScanBuffer'
+        'IsaacCreateRTXLidarScanBuffer'
     )
     lidar_annotator.attach([hydra_texture])
 
