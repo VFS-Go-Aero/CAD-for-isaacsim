@@ -76,6 +76,56 @@ dome_cfg = sim_utils.DomeLightCfg(color=(0.13, 0.13, 0.13), intensity=1000.0)
 dome_cfg.func('/World/SkyLight', dome_cfg)
 
 # ============================================================
+# Uneven terrain mesh for LiDAR testing
+# ============================================================
+# Generate a heightfield using sine/cosine waves. The mesh is
+# centered at the origin and sized to cover the flight area.
+# The ground plane remains underneath as a safety net.
+
+def add_terrain(stage, prim_path, size=20.0, resolution=100, amplitude=0.5):
+    """Create a procedural terrain mesh with rolling hills."""
+    x = np.linspace(-size / 2, size / 2, resolution)
+    z = np.linspace(-size / 2, size / 2, resolution)
+    xx, zz = np.meshgrid(x, z)
+
+    # Combine several frequencies for natural-looking terrain
+    heights = (
+        amplitude * np.sin(xx * 0.8) * np.cos(zz * 0.6)
+        + (amplitude * 0.5) * np.sin(xx * 1.5 + 1.0)
+        + (amplitude * 0.3) * np.cos(zz * 2.0 + 0.5)
+    )
+
+    # Build vertices (X, Y, Z) in world Z-up frame
+    verts = []
+    for i in range(resolution):
+        for j in range(resolution):
+            verts.append(Gf.Vec3f(float(xx[i, j]), float(zz[i, j]), float(heights[i, j])))
+
+    # Build triangle faces from the grid
+    faces = []
+    for i in range(resolution - 1):
+        for j in range(resolution - 1):
+            v0 = i * resolution + j
+            v1 = v0 + 1
+            v2 = v0 + resolution
+            v3 = v2 + 1
+            faces.extend([v0, v1, v2, v1, v3, v2])
+    num_faces = (resolution - 1) * (resolution - 1) * 2
+
+    m = UsdGeom.Mesh.Define(stage, prim_path)
+    m.GetPointsAttr().Set(Vt.Vec3fArray(verts))
+    m.GetFaceVertexIndicesAttr().Set(Vt.IntArray(faces))
+    m.GetFaceVertexCountsAttr().Set(Vt.IntArray([3] * num_faces))
+    m.GetSubdivisionSchemeAttr().Set('none')
+    m.GetDoubleSidedAttr().Set(True)
+    m.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0.45, 0.55, 0.35)]))
+
+    UsdPhysics.CollisionAPI.Apply(m.GetPrim())
+
+add_terrain(stage, '/World/Terrain', size=20.0, resolution=100, amplitude=0.5)
+print('[BUILD] Added uneven terrain mesh')
+
+# ============================================================
 # Vehicle root — Y-up to Z-up rotation, start above ground
 # ============================================================
 vehicle = UsdGeom.Xform.Define(stage, '/World/Vehicle')
