@@ -1,0 +1,186 @@
+<?xml version="1.0"?>
+<!--
+  VFS Go Aero Vehicle - Fixed URDF for Isaac Sim
+
+  Fixes applied from original XML2.urdf:
+    - Names: removed spaces, descriptive wheel names (fl/fr/rl/rr)
+    - Units: converted mm to meters (joint origins, collision boxes, inertial origins)
+    - Mesh scale: 0.001 to convert mm STL meshes to meters
+    - Masses: realistic values (200kg frame, 15kg/wheel)
+    - Inertias: computed from approximate dimensions
+    - Joints: chassis is fixed to base, wheels are continuous (unlimited spin)
+    - Mesh assignments: corrected (FR position gets FR.stl, etc.)
+    - Collision geometry: restored from original with box approximations
+    - Paths: relative to meshes/ directory
+
+  Coordinate frame (after import):
+    X = right, Y = up, Z = forward (ROS convention applied by importer)
+    Vehicle wheelbase: ~1.03m, track width: ~0.94m
+-->
+<robot name="go_aero_vehicle">
+
+  <material name="frame_color">
+    <color rgba="0.3 0.3 0.3 1.0"/>
+  </material>
+  <material name="wheel_color">
+    <color rgba="0.15 0.15 0.15 1.0"/>
+  </material>
+
+  <!-- ==================== BASE ==================== -->
+  <link name="base_link"/>
+
+  <joint name="base_to_chassis" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child link="chassis"/>
+  </joint>
+
+  <!-- ==================== CHASSIS ==================== -->
+  <link name="chassis">
+    <inertial>
+      <origin xyz="0.0 -0.095 0.0" rpy="0 0 0"/>
+      <mass value="200.0"/>
+      <!-- Approximate box 1.06m x 0.6m x 1.15m -->
+      <inertia ixx="28.0" ixy="0" ixz="0" iyy="40.0" iyz="0" izz="25.0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/frame.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="frame_color"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0 -0.222 0.0" rpy="0 0 0"/>
+      <geometry>
+        <box size="1.061 0.604 1.150"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== FRONT RIGHT WHEEL ==================== -->
+  <!-- Position: +X (right), -Z (front) in CAD frame -->
+  <joint name="chassis_to_wheel_fr" type="continuous">
+    <origin xyz="0.468 0.048 -0.51539" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <parent link="chassis"/>
+    <child link="wheel_fr"/>
+    <dynamics damping="0.18" friction="0.005"/>
+  </joint>
+
+  <link name="wheel_fr">
+    <inertial>
+      <origin xyz="0.0 -0.00152 0.0" rpy="0 0 0"/>
+      <mass value="15.0"/>
+      <!-- Approximate cylinder r=0.4m, h=0.065m -->
+      <inertia ixx="0.65" ixy="0" ixz="0" iyy="1.2" iyz="0" izz="0.65"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/FR.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="wheel_color"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0 -0.0046 0.0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.064 0.013 0.813"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== FRONT LEFT WHEEL ==================== -->
+  <!-- Position: -X (left), -Z (front) in CAD frame -->
+  <joint name="chassis_to_wheel_fl" type="continuous">
+    <origin xyz="-0.468 0.048 -0.51539" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <parent link="chassis"/>
+    <child link="wheel_fl"/>
+    <dynamics damping="0.18" friction="0.005"/>
+  </joint>
+
+  <link name="wheel_fl">
+    <inertial>
+      <origin xyz="0.0 -0.00152 0.0" rpy="0 0 0"/>
+      <mass value="15.0"/>
+      <inertia ixx="0.65" ixy="0" ixz="0" iyy="1.2" iyz="0" izz="0.65"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/FL.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="wheel_color"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0 -0.0046 0.0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.064 0.013 0.813"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== REAR RIGHT WHEEL ==================== -->
+  <!-- Position: +X (right), +Z (rear) in CAD frame -->
+  <joint name="chassis_to_wheel_rr" type="continuous">
+    <origin xyz="0.468 0.048 0.51539" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <parent link="chassis"/>
+    <child link="wheel_rr"/>
+    <dynamics damping="0.18" friction="0.005"/>
+  </joint>
+
+  <link name="wheel_rr">
+    <inertial>
+      <origin xyz="0.0 -0.00152 0.0" rpy="0 0 0"/>
+      <mass value="15.0"/>
+      <inertia ixx="0.65" ixy="0" ixz="0" iyy="1.2" iyz="0" izz="0.65"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/BR.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="wheel_color"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0 -0.0046 0.0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.064 0.013 0.813"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ==================== REAR LEFT WHEEL ==================== -->
+  <!-- Position: -X (left), +Z (rear) in CAD frame -->
+  <joint name="chassis_to_wheel_rl" type="continuous">
+    <origin xyz="-0.468 0.048 0.51539" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <parent link="chassis"/>
+    <child link="wheel_rl"/>
+    <dynamics damping="0.18" friction="0.005"/>
+  </joint>
+
+  <link name="wheel_rl">
+    <inertial>
+      <origin xyz="0.0 -0.00152 0.0" rpy="0 0 0"/>
+      <mass value="15.0"/>
+      <inertia ixx="0.65" ixy="0" ixz="0" iyy="1.2" iyz="0" izz="0.65"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/BL.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="wheel_color"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0 -0.0046 0.0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.064 0.013 0.813"/>
+      </geometry>
+    </collision>
+  </link>
+
+</robot>
