@@ -75,6 +75,82 @@ pip install 'isaaclab[isaacsim,all]==2.3.2' --extra-index-url https://pypi.nvidi
 pip install trimesh pymavlink mavsdk
 ```
 
+### Updated Conda IsaacLab Build
+```bash
+#!/bin/bash
+set -e  # stop immediately if any command fails, instead of silently continuing
+
+# --- Conda setup ---
+source ~/miniconda3/etc/profile.d/conda.sh
+conda config --set auto_activate_base false
+
+# Accept conda terms of service (this was missing before, which is why
+# env_isaaclab_jazzy never actually got created and every pip install
+# below ran against the system Python instead)
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
+conda init bash
+source ~/.bashrc
+
+# Remove any partial/broken env from a previous failed attempt
+conda env remove -n env_isaaclab_jazzy -y || true
+
+conda create -n env_isaaclab_jazzy python=3.11 -y
+conda activate env_isaaclab_jazzy
+
+# Sanity check: make sure activation actually worked before installing anything
+if [[ "$(which python)" != *"env_isaaclab_jazzy"* ]]; then
+    echo "ERROR: conda environment did not activate correctly. Aborting."
+    echo "python resolved to: $(which python)"
+    exit 1
+fi
+echo "Using python: $(which python)"
+
+pip install --upgrade pip setuptools
+pip install 'isaacsim[all,extscache]==5.1.0' --extra-index-url https://pypi.nvidia.com
+
+# flatdict==4.0.1 (required by isaaclab) has a broken setup.py that calls pkg_resources,
+# which is absent in pip's isolated build envs on modern setuptools. This patches it
+# and pre-builds a wheel that pip will use instead of rebuilding from source.
+python - << 'EOF'
+import subprocess, sys, tarfile, urllib.request
+from pathlib import Path
+
+src = Path("/tmp/flatdict_src")
+whl = Path("/tmp/flatdict_whl")
+src.mkdir(exist_ok=True)
+whl.mkdir(exist_ok=True)
+
+url = "https://files.pythonhosted.org/packages/source/f/flatdict/flatdict-4.0.1.tar.gz"
+tgz = src / "flatdict-4.0.1.tar.gz"
+print("Downloading flatdict source...")
+urllib.request.urlretrieve(url, tgz)
+
+with tarfile.open(tgz) as t:
+    t.extractall(src)
+
+(src / "flatdict-4.0.1" / "setup.py").write_text(
+    "import setuptools\nsetuptools.setup()\n"
+)
+
+print("Building patched wheel...")
+subprocess.check_call([sys.executable, "-m", "pip", "wheel",
+    str(src / "flatdict-4.0.1"), "--no-deps", "-w", str(whl)])
+print("Done:", list(whl.iterdir()))
+EOF
+
+pip install 'isaaclab[isaacsim,all]==2.3.2' --extra-index-url https://pypi.nvidia.com --find-links /tmp/flatdict_whl/
+pip install trimesh pymavlink mavsdk
+
+# --- Final verification ---
+echo "=== conda envs ==="
+conda info --envs
+
+echo "=== import check ==="
+python -c "import isaaclab; print('isaaclab imported OK')"
+```
+
 ### 3. ROS2 Jazzy (system packages for rosbridge)
 
 ```bash
