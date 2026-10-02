@@ -1,0 +1,91 @@
+name: Sensor integration
+description: Simulate a real sensor (camera, LiDAR, etc.) on the vehicle in Isaac Sim.
+title: "[Sensor] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is **public**. Do not include credentials, IP addresses, hostnames, license keys or AWS instance details.
+        Proprietary SDKs (e.g. ZED SDK) are documented as download steps; installers and license files are never committed.
+  - type: input
+    id: model
+    attributes:
+      label: Sensor model and count
+      placeholder: "1x ZED X Mini"
+    validations:
+      required: true
+  - type: input
+    id: sdk-version
+    attributes:
+      label: SDK / driver version on the real vehicle
+      placeholder: "ZED SDK 5.0.1"
+    validations:
+      required: true
+  - type: textarea
+    id: mounting
+    attributes:
+      label: Mounting pose
+      description: >-
+        Position (x/y/z in metres from the frame origin) and orientation (roll/pitch/yaw
+        in degrees), or say where it is in the CAD assembly.
+      placeholder: "x=0.45 y=0.00 z=0.10, pitch=-15 (forward-facing, tilted down)"
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output settings
+      description: Resolution, frame rate, depth/range mode, field of view, etc.
+      placeholder: "HD720 @ 60 fps, NEURAL depth"
+  - type: textarea
+    id: consumer
+    attributes:
+      label: Software that consumes the data
+      description: >-
+        Link the code (repo/path). Does it call the SDK directly or read ROS2 topics?
+        Which features does it use (depth, point cloud, tracking, object detection)?
+    validations:
+      required: true
+  - type: dropdown
+    id: consumer-host
+    attributes:
+      label: Where the consuming software runs during sim
+      options:
+        - Isaac Sim host
+        - Real Jetson on the network
+        - Not sure
+  - type: dropdown
+    id: feedback
+    attributes:
+      label: Does the output feed back into flight control?
+      options:
+        - No, logged or visualized only
+        - Yes, via MAVLink / MAVSDK offboard
+        - Yes, via ROS2 (uXRCE-DDS or MAVROS)
+        - Not sure
+  - type: textarea
+    id: scene
+    attributes:
+      label: Test scene
+      description: What should be in the environment to exercise the sensor?
+      placeholder: "3 boxes and a wall at 2-10 m along the flight path"
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Done when
+      description: A concrete demo or test that proves it works.
+      placeholder: "The unmodified detection script runs against the simulated sensor and reports an obstacle placed 5 m ahead."
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: Related issues / dependencies
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security
+      options:
+        - label: I have not included credentials, IP addresses, hostnames, license keys or AWS instance details.
+          required: true

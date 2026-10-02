@@ -1,0 +1,80 @@
+name: Simulation feature / integration
+description: Add a tool, SDK, autopilot or workflow to the Isaac Sim + PX4 setup.
+title: "[Sim] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is **public**. Do not include credentials, IP addresses, hostnames, license keys or AWS instance details.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should be possible once this is done, and why do we need it?
+    validations:
+      required: true
+  - type: textarea
+    id: real-setup
+    attributes:
+      label: Real-vehicle setup to match
+      description: Hardware and exact software versions on the real vehicle.
+      placeholder: "Pixhawk 6C / PX4 v1.15, Jetson Orin NX / JetPack 6.0 / ROS2 Humble"
+    validations:
+      required: true
+  - type: dropdown
+    id: sim-mode
+    attributes:
+      label: Simulation mode
+      description: See simulation/ARCHITECTURE.md.
+      options:
+        - Visualizer (px4_visualizer.py, PX4 SIH physics)
+        - HIL bridge (px4_bridge.py, Isaac Sim PhysX)
+        - Both
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Where it runs
+      multiple: true
+      options:
+        - Isaac Sim host (AWS)
+        - Isaac Sim host (local workstation)
+        - Real Jetson on the network
+        - Windows laptop
+        - Other / not sure
+  - type: textarea
+    id: interfaces
+    attributes:
+      label: Interfaces
+      description: MAVLink ports, ROS2 topics, APIs or files it reads and writes. Link any existing code (repo/path) that must run unmodified.
+  - type: textarea
+    id: network
+    attributes:
+      label: Network exposure
+      description: >-
+        Does this open a port or service to another machine or the internet?
+        MAVLink and ROS2/DDS have no authentication by default, so describe how
+        it will be protected (e.g. SSH tunnel or VPN, not an open security group).
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Done when
+      description: A concrete demo or test that proves it works.
+      placeholder: "Upload a 4-waypoint mission from the ground station; the vehicle flies it in Isaac Sim and lands."
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: Related issues / dependencies
+      placeholder: "Depends on #4"
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security
+      options:
+        - label: I have not included credentials, IP addresses, hostnames, license keys or AWS instance details.
+          required: true
