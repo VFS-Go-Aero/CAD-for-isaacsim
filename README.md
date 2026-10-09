@@ -462,3 +462,84 @@ aws ec2 start-instances --instance-ids <INSTANCE_ID> --region us-east-1
 # SSH for terminals
 ssh -i key.pem ubuntu@<ELASTIC_IP>
 ```
+
+## ArduPilot SITL + Isaac Sim visualizer (alternative to PX4)
+
+The flight controller and physics run in the autopilot's own SITL process.
+Isaac Sim only visualizes the vehicle state it receives over MAVLink, so
+switching between PX4 and ArduPilot means swapping that one process.
+
+```
+PX4:       PX4 SITL (SIH)  -> MAVLink -> 14550 QGC / 14540 MAVSDK / 14580 -> MAVProxy -> 14551 -> visualizer
+ArduPilot: ArduCopter SITL -> tcp 5760 -> MAVProxy (started by sim_vehicle.py)
+                              -> 14550 QGC / 14561 visualizer / 14540 scripts
+```
+
+### One-time setup
+
+```bash
+cd ~
+git clone --recurse-submodules https://github.com/ArduPilot/ardupilot.git
+cd ardupilot && git checkout ArduCopter-stable && git submodule update --init --recursive
+Tools/environment_install/install-prereqs-ubuntu.sh -y
+
+# MAVProxy and PATH (Ubuntu 24.04 blocks plain pip installs)
+pip3 install --user --break-system-packages MAVProxy pymavlink
+echo 'export PATH=$PATH:$HOME/.local/bin:$HOME/ardupilot/Tools/autotest' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Keep `~/ardupilot` outside this repo. Run SITL from a terminal with no conda env active.
+
+### Run (three terminals)
+
+1. ArduPilot SITL (no conda). Wait for the `STABILIZE>` prompt and the EKF-using-GPS message:
+```bash
+   cd ~/ardupilot/ArduCopter
+   sim_vehicle.py -v ArduCopter -f quad --console -w --out=127.0.0.1:14561 --out=127.0.0.1:14540
+```
+2. Visualizer. Wait for `Visualizer running!`:
+```bash
+   export DISPLAY=:1 ROS_DISTRO=jazzy RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+   source ~/miniconda3/etc/profile.d/conda.sh && conda activate env_isaaclab_jazzy
+   export LD_LIBRARY_PATH=$HOME/miniconda3/envs/env_isaaclab_jazzy/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/jazzy/lib:$LD_LIBRARY_PATH
+   python ~/go_aero/px4_visualizer.py --device cuda --mavlink-port 14561
+```
+3. Position hold (no conda): arms, takes off to 5 m, holds throttle at 50% (1500 PWM),
+   switches to PosHold, holds, then lands:
+```bash
+   python3 ~/go_aero/ardu_poshold.py --altitude 5 --throttle-pct 50 --hold 30
+```
+
+### Differences from the PX4 setup
+
+| | PX4 | ArduPilot |
+|---|---|---|
+| Start command | `bin/px4 -d` with `sihsim_quadx` | `sim_vehicle.py -v ArduCopter -f quad` |
+| MAVProxy | started by hand (`udpout:127.0.0.1:14580`) | started by `sim_vehicle.py` |
+| Visualizer port | 14551 | 14561 |
+| Scripts | MAVSDK on 14540 | pymavlink on 14540 |
+| Modes | PX4 modes | GUIDED, POSHOLD, LAND |
+| Takeoff | `action.takeoff()` | `MAV_CMD_NAV_TAKEOFF` in GUIDED |
+| Throttle | n/a | RC override channel 3; 1500 PWM = hold altitude in PosHold |
+| Arming | ready quickly | wait until the EKF uses GPS, otherwise pre-arm errors |
+
+`-w` wipes parameters and loads the copter defaults on every start. Drop it to keep tuned parameters.
+
+### Terrain
+
+The drone can fall through gaps in the terrain mesh. To disable it for a session, run in Isaac Sim's Script Editor:
+
+```python
+import omni.usd
+omni.usd.get_context().get_stage().GetPrimAtPath("/World/Terrain").SetActive(False)
+```
+
+A full visualizer restart reloads the scene and brings it back.
+
+### Troubleshooting
+
+- `sim_vehicle.py: command not found`: run `source ~/.bashrc`, leave conda (`conda deactivate`), or use `~/ardupilot/Tools/autotest/sim_vehicle.py`.
+- `No such file ... 'mavproxy.py'`: `which mavproxy.py` should print `~/.local/bin/mavproxy.py`.
+- Visualizer stuck at "Waiting for PX4 heartbeat": check `output` at the `STABILIZE>` prompt lists `127.0.0.1:14561`.
+- Arming refused: wait for the EKF to report GPS, then retry.
