@@ -1,19 +1,20 @@
-# Go Aero eVTOL — Isaac Sim + PX4 SITL Simulation
+# Go Aero eVTOL — Isaac Sim + PX4 & ArduPilot SITL Simulation
 
-Simulate the Go Aero quadrotor eVTOL in NVIDIA Isaac Sim with PX4 autopilot firmware.
+Simulate the Go Aero quadrotor eVTOL in NVIDIA Isaac Sim with PX4 or ArduPilot (ArduCopter) autopilot firmware.
 
 ## What This Does
 
-- Loads the Go Aero CAD model (STL meshes) into Isaac Sim
-- Runs PX4 autopilot firmware in Software-In-The-Loop (SITL) mode
-- Visualizes the drone flying in real-time with spinning propellers
-- Supports autonomous flight commands (takeoff, waypoints, land) via MAVSDK
+- Loads the Go Aero CAD model (STL meshes) into Isaac Sim with rigid-body physics, uneven terrain, 3D obstacles (3 m, 5 m, 10 m), and onboard RTX LiDAR + dual ZED X stereo/depth camera mounts
+- Runs **PX4 Autopilot** or **ArduPilot (ArduCopter)** in Software-In-The-Loop (SITL) mode
+- Supports both **Mode 1 (Visualizer)** (`px4_visualizer.py`) and **Mode 2 (Full PhysX HIL/SIL Bridge)** (`px4_bridge.py` / `ardupilot_bridge.py`)
+- Supports autonomous flight commands (takeoff, waypoints, PosHold, 3D obstacle avoidance) via MAVSDK (`fly_demo.py`) and PyMAVLink (`ardu_poshold.py`)
+- Streams ROS 2 topics (`/zed1/zed_node/point_cloud/cloud_registered`, `/zed2/zed_node/point_cloud/cloud_registered`, `/lidar/points`, `/clock`, `/tf`, `/tf_static`) to the Go Aero Jetson obstacle detection & avoidance stack (`point_cloud` → `/merged_cloud` → `obstacle_detection` → `/merged_cloud/obstacles` → `obstacle_to_mavlink` → `/mavros/obstacle_distance_3d/send` & `/mavros/obstacle/send`; see [`simulation/JETSON_HIL.md`](./simulation/JETSON_HIL.md) and [`docker/jetson-sil/`](./docker/jetson-sil/))
 
 ## Requirements
 
 - **Ubuntu 24.04**
 - **NVIDIA GPU** (8GB+ VRAM) with CUDA drivers
-- **~30GB disk** (Isaac Sim + PX4 + conda env)
+- **~30GB disk** (Isaac Sim + PX4/ArduPilot + conda env)
 
 ## Install
 
@@ -72,7 +73,7 @@ print("Done:", list(whl.iterdir()))
 EOF
 
 pip install 'isaaclab[isaacsim,all]==2.3.2' --extra-index-url https://pypi.nvidia.com --find-links /tmp/flatdict_whl/
-pip install trimesh pymavlink mavsdk
+pip install trimesh pymavlink 'mavsdk<4'
 ```
 
 ### Updated Conda IsaacLab Build
@@ -141,7 +142,7 @@ print("Done:", list(whl.iterdir()))
 EOF
 
 pip install 'isaaclab[isaacsim,all]==2.3.2' --extra-index-url https://pypi.nvidia.com --find-links /tmp/flatdict_whl/
-pip install trimesh pymavlink mavsdk
+pip install trimesh pymavlink 'mavsdk<4'
 
 # --- Final verification ---
 echo "=== conda envs ==="
@@ -197,22 +198,22 @@ cat > ~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/10050_none_go_a
 param set-default CA_AIRFRAME 0
 param set-default CA_ROTOR_COUNT 4
 
-# Motor 1: Front-Right (CW)
+# Motor 1: Front-Right (CCW)
 param set-default CA_ROTOR0_PX 0.515
 param set-default CA_ROTOR0_PY 0.468
 param set-default CA_ROTOR0_KM 0.05
 
-# Motor 2: Rear-Right (CCW)
+# Motor 2: Rear-Right (CW)
 param set-default CA_ROTOR1_PX -0.515
 param set-default CA_ROTOR1_PY 0.468
 param set-default CA_ROTOR1_KM -0.05
 
-# Motor 3: Rear-Left (CW)
+# Motor 3: Rear-Left (CCW)
 param set-default CA_ROTOR2_PX -0.515
 param set-default CA_ROTOR2_PY -0.468
 param set-default CA_ROTOR2_KM 0.05
 
-# Motor 4: Front-Left (CCW)
+# Motor 4: Front-Left (CW)
 param set-default CA_ROTOR3_PX 0.515
 param set-default CA_ROTOR3_PY -0.468
 param set-default CA_ROTOR3_KM -0.05
@@ -222,9 +223,10 @@ param set-default PWM_MAIN_FUNC2 102
 param set-default PWM_MAIN_FUNC3 103
 param set-default PWM_MAIN_FUNC4 104
 
-param set-default SENS_EN_GPSSIM 1
-param set-default SENS_EN_BAROSIM 1
-param set-default SENS_EN_MAGSIM 1
+param set-default SYS_HITL 1
+param set-default SENS_EN_GPSSIM 0
+param set-default SENS_EN_BAROSIM 0
+param set-default SENS_EN_MAGSIM 0
 EOF
 
 chmod +x ~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/10050_none_go_aero
@@ -252,24 +254,24 @@ git clone https://github.com/VFS-Go-Aero/CAD-for-isaacsim.git ~/go_aero_repo
 cd ~/go_aero_repo
 git checkout sgoss/isaac-sim-import
 
-# Copy meshes and scripts to working directory
-mkdir -p ~/go_aero/meshes
+# Copy meshes, scripts, and ArduPilot parameters to working directory
+mkdir -p ~/go_aero/meshes ~/go_aero/params
 cp meshes/* ~/go_aero/meshes/
-cp simulation/build_scene.py simulation/open_scene.py simulation/px4_visualizer.py \
-   simulation/fly_demo.py simulation/px4_bridge.py ~/go_aero/
+cp simulation/*.py ~/go_aero/
+cp simulation/params/* ~/go_aero/params/
 
-# Build the USD scene (headless, takes ~60s)
+# Build the USD scene with 3m/5m/10m obstacles (headless, takes ~60s)
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate env_isaaclab_jazzy
 export ROS_DISTRO=jazzy
-python ~/go_aero/build_scene.py --headless
+python ~/go_aero/build_scene.py --headless --obstacles
 ```
 
-This creates `~/go_aero/vehicle_scene.usd` with the Go Aero model, ground plane, and lighting.
+This creates `~/go_aero/vehicle_scene.usd` with the Go Aero model, uneven terrain, 3 m / 5 m / 10 m calibration obstacles, sensor mounts, ground plane, and lighting.
 
-## Run the Demo
+## Run the Demo (PX4 SITL)
 
-You need **three terminals** (or use `nohup` for background processes).
+You need **three terminals** (or use `nohup` / `tmux` for background processes).
 
 ### Terminal 1: Start PX4
 
@@ -324,20 +326,142 @@ asyncio.run(run())
 "
 ```
 
+## Alternate Flow: ArduPilot (Copter SITL)
+
+Instead of PX4, both the **Visualizer (Mode 1)** and **PhysX Bridge (Mode 2)** work with **ArduPilot's Copter SITL**:
+- **Mode 1 (`px4_visualizer.py`)** — ArduPilot SITL (`-f quad`) runs its internal physics model and streams MAVLink `GLOBAL_POSITION_INT` + `ATTITUDE` over UDP `14550` to Isaac Sim.
+- **Mode 2 (`ardupilot_bridge.py`)** — Isaac Sim PhysX owns the physics and exchanges binary servo PWM packets (`0x481A` / `18458`) and JSON sensor state (`\n{...}\n`) with ArduPilot SITL (`-f JSON`) over UDP `9002`.
+
+### One-Time Install (on the instance)
+
+```bash
+# Clone ArduPilot + submodules
+cd ~
+git clone --recurse-submodules https://github.com/ArduPilot/ardupilot.git
+cd ~/ardupilot
+
+# Install ArduPilot prereqs (skipped on Ubuntu 24.04 where the installer script lags;
+# install the pieces SITL actually needs directly into the conda env):
+conda activate env_isaaclab_jazzy
+pip install empy==3.3.4 pexpect future pymavlink MAVProxy
+
+# Pre-compile ArduCopter SITL binary (takes ~3 min the first time)
+./waf configure --board sitl
+./waf copter
+```
+
+### Mode 1: ArduPilot SITL Internal Physics + `px4_visualizer.py` (3 Terminals)
+
+**Terminal 1 — ArduPilot Copter SITL:**
+```bash
+conda activate env_isaaclab_jazzy
+cd ~/ardupilot
+Tools/autotest/sim_vehicle.py -v ArduCopter -f quad --no-rebuild \
+  --add-param-file=$HOME/go_aero/params/go_aero_ardupilot.param \
+  --out=udp:127.0.0.1:14550 \
+  --out=udp:127.0.0.1:14540 \
+  --out=udp:127.0.0.1:14551
+```
+- `14550` feeds `px4_visualizer.py`
+- `14540` feeds your control script (`ardu_poshold.py`, MAVProxy, etc.)
+- `14551` (plus `SERIAL1` TCP `5762`) feeds the Jetson / SIL obstacle detection stack (`obstacle_to_mavlink` + `latency_relay.py` + MAVROS sending `OBSTACLE_DISTANCE_3D`)
+- Wait ~15 s until the console prints `EKF3 IMU0 is using GPS` before arming.
+
+**Terminal 2 — Isaac Sim Visualizer:**
+```bash
+export DISPLAY=:1
+conda activate env_isaaclab_jazzy
+# (--port 14550 is also supported as an alias for --mavlink-port 14550)
+python ~/go_aero/px4_visualizer.py --device cuda --mavlink-port 14550
+```
+
+**Terminal 3 — PosHold or Obstacle Avoidance Flight Test:**
+```bash
+conda activate env_isaaclab_jazzy
+# PosHold hover test: takes off in GUIDED to 5 m, sets RC3 throttle override to 50%
+# (1500 PWM = hover mid-stick), switches to POSHOLD for 30 s, then LANDs:
+python ~/go_aero/ardu_poshold.py --altitude 5 --throttle-pct 50 --hold 30
+
+# Or GUIDED forward obstacle avoidance test (commands 8 m North toward the 5 m obstacle,
+# verifying ArduPilot stops at AVOID_MARGIN = 2.0 m in front of the obstacle):
+python ~/go_aero/ardu_poshold.py --mode guided-forward --target-north 8 --altitude 2.5 --hold 20
+```
+
+### Mode 2: Isaac Sim PhysX + ArduPilot SITL JSON Bridge (`ardupilot_bridge.py`)
+
+**Terminal 1 — Isaac Sim ArduPilot PhysX Bridge (start first):**
+```bash
+export DISPLAY=:1
+conda activate env_isaaclab_jazzy
+python ~/go_aero/ardupilot_bridge.py --device cuda --port 9002 --lidar --zed --ros2
+```
+Wait for `Waiting for ArduPilot SITL (-f JSON) on UDP 9002...`.
+
+**Terminal 2 — ArduPilot Copter SITL (`-f JSON`):**
+```bash
+conda activate env_isaaclab_jazzy
+cd ~/ardupilot
+Tools/autotest/sim_vehicle.py -v ArduCopter -f JSON --no-rebuild \
+  --add-param-file=$HOME/go_aero/params/go_aero_ardupilot.param \
+  --out=udp:127.0.0.1:14550 \
+  --out=udp:127.0.0.1:14540 \
+  --out=udp:127.0.0.1:14551
+```
+
+**Terminal 3 — Flight Test (`ardu_poshold.py`):**
+```bash
+conda activate env_isaaclab_jazzy
+python ~/go_aero/ardu_poshold.py --altitude 5 --throttle-pct 50 --hold 30
+```
+
+## Ground Control Station (GCS) Setup
+
+- **Mission Planner (for ArduPilot SITL over SSH TCP tunnel):**
+  ArduPilot's `sim_vehicle.py` exposes MAVLink on TCP port `5763` (`SERIAL2`) by default. Forward it over SSH from your local machine so Mission Planner never steals UDP `14550` from `px4_visualizer.py`:
+  ```bash
+  ssh -i key.pem -L 5763:127.0.0.1:5763 ubuntu@<ELASTIC_IP>
+  ```
+  In Mission Planner, select **TCP**, host `127.0.0.1`, port `5763`, and click **Connect**.
+- **QGroundControl (for PX4 SITL on dedicated UDP port `14601`):**
+  Do **not** point QGroundControl at UDP `14550` on the same machine as `px4_visualizer.py` — otherwise QGC will steal `14550` from `px4_visualizer.py`. Instead, open a dedicated GCS MAVLink stream on UDP `14601` (in the PX4 shell: `mavlink start -x -u 14600 -o 14601 -r 4000000`, using local source port `14600` to avoid conflicting with PX4's onboard link on `14580`) and configure QGroundControl with a UDP Comm Link listening on port `14601`.
+
+## Jetson HIL & Docker SIL Obstacle Detection (`OBSTACLE_DISTANCE_3D` & `OBSTACLE_DISTANCE`)
+
+To run the full **Go Aero Obstacle Detection & Avoidance** stack (`VFS-Go-Aero/visual-obstacle-detection` nodes `point_cloud`, `obstacle_detection`, and `obstacle_to_mavlink` + `latency_relay.py` + MAVROS):
+- See [`simulation/JETSON_HIL.md`](./simulation/JETSON_HIL.md) for the end-to-end architecture, ROS 2 topic wiring (`/zed1/zed_node/point_cloud/cloud_registered`, `/zed2/zed_node/point_cloud/cloud_registered`, `/merged_cloud`, `/merged_cloud/obstacles`, `/mavros/obstacle_distance_3d/send`, `/mavros/obstacle/send`), and step-by-step Hardware-In-The-Loop (physical Jetson Orin NX) & Software-In-The-Loop instructions.
+- See [`docker/jetson-sil/`](./docker/jetson-sil/) (`docker compose -f docker/jetson-sil/docker-compose.yml --profile test run --rm jetson-sil-test`) to run the entire Jetson obstacle detection pipeline in a container on macOS or Linux **without a physical Jetson**.
+
 ## Files
 
 | File | Description |
 |------|-------------|
-| `meshes/` | STL mesh files (frame + 4 propellers) |
+| `meshes/` | STL mesh files (`frame.stl`, `FR.stl`, `FL.stl`, `BR.stl`, `BL.stl`) |
 | `go_aero_vehicle.urdf` | Fixed URDF (reference, not used for rendering) |
+| `XML2_fixed.urdf` | Alternate URDF reference |
 | `simulation/` | Simulation scripts + dedicated docs (see [`simulation/README.md`](./simulation/README.md)) |
-| `simulation/build_scene.py` | Builds `vehicle_scene.usd` from STL meshes |
-| `simulation/open_scene.py` | Opens scene with optional hover controller |
-| `simulation/px4_visualizer.py` | Reads PX4 state via MAVLink, updates Isaac Sim |
-| `simulation/fly_demo.py` | MAVSDK script: takeoff, fly square, land |
-| `simulation/px4_bridge.py` | MAVLink bridge (for future HIL mode) |
+| `simulation/_frames.py` | Shared NED/ENU + mesh-fix quaternion helpers |
+| `simulation/_compat.py` | Isaac Sim 5.1 / 6.0 compatibility layer & shared USD prim path constants |
+| `simulation/build_scene.py` | Builds `vehicle_scene.usd` from STL meshes (with obstacles, uneven terrain, LiDAR & ZED mounts) |
+| `simulation/open_scene.py` | Opens scene with standalone PID hover controller |
+| `simulation/px4_visualizer.py` | Mode 1 visualizer: mirrors PX4 or ArduPilot state via MAVLink into Isaac Sim |
+| `simulation/px4_bridge.py` | Mode 2 PhysX HIL bridge for PX4 SITL (`HIL_SENSOR` / `HIL_ACTUATOR_CONTROLS`) |
+| `simulation/ardupilot_bridge.py` | Mode 2 PhysX bridge for ArduPilot SITL (`-f JSON`, UDP 9002) |
+| `simulation/fly_demo.py` | MAVSDK script: takeoff, fly square, land (PX4) |
+| `simulation/ardu_poshold.py` | ArduPilot flight & obstacle avoidance test script (`poshold` and `guided-forward` modes) |
+| `simulation/joystick_control.py` | Xbox controller → `MANUAL_CONTROL` over UDP to PX4 / ArduPilot |
+| `simulation/add_lidar_tutorial.py` | Standalone tutorial script attaching RTX LiDAR at `/World/Vehicle/chassis/lidar_mount` |
+| `simulation/add_zed_tutorial.py` | Standalone tutorial script attaching ZED X cameras at `zed1_mount` and `zed2_mount` |
+| `simulation/jetson_sil_launch.py` | ROS 2 Humble SIL launch file for `visual_obstacle_detection` + MAVROS + `latency_relay.py` |
+| `simulation/synthetic_zed_publisher.py` | Synthetic ZED X `PointCloud2` publisher & standalone pure-Python obstacle pipeline self-test |
+| `simulation/latency_relay.py` | 80 ms Orin NX compute latency buffer & 72-sector PX4 2D `OBSTACLE_DISTANCE` bridge |
+| `simulation/params/go_aero_ardupilot.param` | ArduCopter parameters (`PRX1_TYPE=2`, `AVOID_ENABLE=7`, `AVOID_BEHAVE=1`, `AVOID_DIST_MAX=5`, `AVOID_MARGIN=2`) |
+| `simulation/JETSON_HIL.md` | Jetson Orin HIL & Docker SIL obstacle detection + avoidance guide |
+| `simulation/LIDAR_TUTORIAL.md` | Step-by-step RTX LiDAR attachment & verification guide |
+| `simulation/ZED_TUTORIAL.md` | Step-by-step ZED X stereo/depth camera attachment & ROS 2 guide |
 | `simulation/ARCHITECTURE.md` | Process topology, data flow, coordinate frames |
 | `simulation/PX4_API.md` | MAVLink + MAVSDK reference for the simulation |
+| `docker/jetson-sil/` | Containerized Jetson ROS 2 Humble + `visual_obstacle_detection` + MAVROS stack |
+| `tests/test_simulation_suite.py` | Pure-Python unit & integration test suite covering frames, bridges, obstacle pipeline, and SIL launch |
 
 ## fly_demo.py Options
 
@@ -347,6 +471,19 @@ asyncio.run(run())
 --size M        Square size in meters (default: 8)
 --speed M       Flight speed in m/s (default: 3)
 --port P        MAVSDK UDP port (default: 14540)
+```
+
+## ardu_poshold.py Options
+
+```
+--altitude M        Takeoff altitude in meters (default: 5.0)
+--throttle-pct P    RC3 throttle percentage for POSHOLD hover (default: 50 -> 1500 PWM)
+--hold S            Hold duration in seconds (default: 30.0)
+--port P            MAVLink UDP port (default: 14540)
+--mode MODE         poshold (default) or guided-forward (obstacle stop verification)
+--target-north M    Target North distance in GUIDED mode (implies --mode guided-forward)
+--obstacle-north M  Known North distance of scene obstacle (default: 5.0)
+--avoid-margin M    Expected ArduPilot AVOID_MARGIN stopping distance (default: 2.0)
 ```
 
 ## Vehicle Specs
@@ -360,24 +497,13 @@ asyncio.run(run())
 | Track width | 0.94m |
 | Wheelbase | 1.03m |
 | Flight controller | Pixhawk 6C |
-| Firmware | PX4 Autopilot |
+| Firmware | PX4 Autopilot / ArduPilot ArduCopter |
 
-## Current Limitations
+## Simulation Modes & Capabilities
 
-- **Visualization only** — PX4 SIH handles all physics internally with a generic quadrotor model. Isaac Sim only mirrors the position.
-- **Generic physics** — Not using the real Go Aero mass, inertia, motor specs, or aerodynamics.
-- **No collision** — The 3D model has no rigid bodies or colliders in Isaac Sim.
-- **No sensors** — No simulated camera, LiDAR, or other sensors on the drone.
-
-## Next Steps for Accurate Simulation
-
-To switch from visualization to full Hardware-In-The-Loop (HIL) simulation:
-
-1. Get real vehicle specs (mass, motor KV, prop diameter/pitch, battery voltage)
-2. Add rigid body physics + collision to the Isaac Sim model
-3. Create motor thrust model (thrust = Ct × ρ × n² × D⁴)
-4. Switch PX4 to HIL mode (Isaac Sim sends sensor data, PX4 sends motor commands)
-5. Tune PX4 parameters to match real vehicle dynamics
+- **Mode 1 — Visualizer (`px4_visualizer.py`)**: PX4 SIH or ArduPilot Copter SITL (`-f quad`) handles flight dynamics internally while Isaac Sim mirrors the 6-DoF vehicle pose (`LOCAL_POSITION_NED` or `GLOBAL_POSITION_INT` + `ATTITUDE`), spins propellers, and optionally streams RTX LiDAR, ZED RGB+depth, and ROS 2 topics (`--lidar --zed --ros2`).
+- **Mode 2 — Full PhysX Bridge (`px4_bridge.py` / `ardupilot_bridge.py`)**: Isaac Sim PhysX is the source of truth for rigid-body dynamics, collisions, ground effect, and onboard sensors (`IMUSensor`, RTX LiDAR, ZED camera), closing the loop with PX4 (`HIL_SENSOR` / `HIL_ACTUATOR_CONTROLS` on TCP 4560) or ArduPilot (`SIM_JSON` on UDP 9002).
+- **3D Obstacle Avoidance (`JETSON_HIL.md` / `docker/jetson-sil`)**: Streams synthetic ZED X point clouds (`/zed1/zed_node/point_cloud/cloud_registered`, `/zed2/zed_node/point_cloud/cloud_registered`) over ROS 2 into the unmodified `VFS-Go-Aero/visual-obstacle-detection` nodes (`point_cloud`, `obstacle_detection`, `obstacle_to_mavlink`) and `latency_relay.py`, publishing `OBSTACLE_DISTANCE_3D` (`/mavros/obstacle_distance_3d/send`) for ArduPilot (`PRX1_TYPE=2`, `AVOID_ENABLE=7`, stopping at `AVOID_MARGIN=2.0 m`) and 72-sector `OBSTACLE_DISTANCE` (`/mavros/obstacle/send`) for PX4 (`CP_DIST=2.0 m`).
 
 ## Troubleshooting
 
@@ -405,7 +531,7 @@ conda create -n env_isaaclab_jazzy python=3.11 -y
 conda activate env_isaaclab_jazzy
 pip install --force-reinstall setuptools wheel
 pip install isaacsim==5.1.0.0 isaaclab==2.3.2
-pip install trimesh pymavlink mavsdk
+pip install trimesh pymavlink 'mavsdk<4'
 ```
 
 Isaac Sim is ~15GB and takes several minutes to install via pip.

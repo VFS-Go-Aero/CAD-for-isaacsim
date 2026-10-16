@@ -1,26 +1,64 @@
 #!/usr/bin/env python3
 """
 Fly the Go Aero drone in a demo loop: takeoff, fly a square, land, repeat.
-Run this AFTER px4_visualizer.py is running.
+Run this AFTER px4_visualizer.py or px4_bridge.py is running.
 
 Usage:
   python fly_demo.py [--loops 3] [--altitude 5] [--size 8] [--speed 3]
 """
-import asyncio
 import argparse
-from mavsdk import System
-from mavsdk.offboard import PositionNedYaw, OffboardError
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--loops', type=int, default=3, help='Number of loops')
-parser.add_argument('--altitude', type=float, default=5.0, help='Flight altitude (m)')
-parser.add_argument('--size', type=float, default=8.0, help='Square size (m)')
-parser.add_argument('--speed', type=float, default=3.0, help='Flight speed (m/s)')
-parser.add_argument('--port', type=int, default=14540, help='MAVSDK UDP port')
-args = parser.parse_args()
+import asyncio
 
 
-async def run():
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--loops', type=int, default=3, help='Number of loops')
+    parser.add_argument('--altitude', type=float, default=5.0, help='Flight altitude (m)')
+    parser.add_argument('--size', type=float, default=8.0, help='Square size (m)')
+    parser.add_argument('--speed', type=float, default=3.0, help='Flight speed (m/s)')
+    parser.add_argument('--port', type=int, default=14540, help='MAVSDK UDP port')
+    return parser
+
+
+async def wait_for_position(drone, target_n, target_e, target_d, tolerance=1.0, timeout=30.0):
+    """Wait until drone is within tolerance of target position using a single
+    `position_velocity_ned()` stream and a deadline timeout.
+
+    Raises `TimeoutError` if the target position is not reached within `timeout` seconds.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + float(timeout)
+
+    async def _poll_stream():
+        async for pos in drone.telemetry.position_velocity_ned():
+            n = pos.position.north_m
+            e = pos.position.east_m
+            d = pos.position.down_m
+            dist = ((n - target_n) ** 2 + (e - target_e) ** 2 + (d - target_d) ** 2) ** 0.5
+            if dist < tolerance:
+                return
+            if loop.time() >= deadline:
+                raise TimeoutError(
+                    f"Timed out after {timeout}s waiting for position "
+                    f"({target_n:.1f}, {target_e:.1f}, {target_d:.1f}); last dist={dist:.2f}m"
+                )
+
+    try:
+        await asyncio.wait_for(_poll_stream(), timeout=float(timeout))
+    except asyncio.TimeoutError:
+        raise TimeoutError(
+            f"Timed out after {timeout}s waiting for position "
+            f"({target_n:.1f}, {target_e:.1f}, {target_d:.1f})"
+        ) from None
+
+
+async def run(args=None):
+    if args is None:
+        args = build_arg_parser().parse_args()
+
+    from mavsdk import System
+    from mavsdk.offboard import OffboardError, PositionNedYaw
+
     drone = System()
     await drone.connect(system_address=f"udpin://0.0.0.0:{args.port}")
 
@@ -67,7 +105,7 @@ async def run():
     print(f"Taking off to {args.altitude}m...")
     await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, alt, 0.0))
     await wait_for_position(drone, 0, 0, alt, tolerance=0.5)
-    print(f"At altitude!")
+    print("At altitude!")
     await asyncio.sleep(2)
 
     # Fly loops
@@ -105,18 +143,5 @@ async def run():
     print("Disarmed. Demo complete!")
 
 
-async def wait_for_position(drone, target_n, target_e, target_d, tolerance=1.0, timeout=30):
-    """Wait until drone is within tolerance of target position."""
-    for _ in range(int(timeout * 10)):
-        async for pos in drone.telemetry.position_velocity_ned():
-            n = pos.position.north_m
-            e = pos.position.east_m
-            d = pos.position.down_m
-            dist = ((n - target_n)**2 + (e - target_e)**2 + (d - target_d)**2)**0.5
-            if dist < tolerance:
-                return
-            break
-        await asyncio.sleep(0.1)
-
-
-asyncio.run(run())
+if __name__ == '__main__':
+    asyncio.run(run())

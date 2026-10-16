@@ -1,0 +1,53 @@
+services:
+  jetson-sil:
+    build:
+      context: ../..
+      dockerfile: docker/jetson-sil/Dockerfile
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-ros:humble-ros-base-jammy}
+        VOD_BRANCH: ${VOD_BRANCH:-feature/visual_obstacle_detection_2}
+        VOD_COMMIT: ${VOD_COMMIT:-cba2f42}
+    image: vfs-go-aero/jetson-sil:humble
+    container_name: go-aero-jetson-sil
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      - FCU_URL=${FCU_URL:-tcp://host.docker.internal:5762}
+      - USE_SIM_TIME=${USE_SIM_TIME:-false}
+      - USE_SYNTHETIC_ZED=${USE_SYNTHETIC_ZED:-true}
+      - USE_ZED_SIM_STREAM=${USE_ZED_SIM_STREAM:-false}
+      - LATENCY_MS=${LATENCY_MS:-80.0}
+      - ENABLE_PX4_2D_BRIDGE=${ENABLE_PX4_2D_BRIDGE:-false}
+      - PX4_MAVLINK_UDP=${PX4_MAVLINK_UDP:-none}
+      - ENABLE_MAVROS=${ENABLE_MAVROS:-true}
+      - VERBOSE=${VERBOSE:-true}
+      - OBSTACLE_DIST=${OBSTACLE_DIST:-4.0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../../simulation:/ros2_ws/sim_scripts:ro
+    # Standalone defaults: use_sim_time:=false and use_synthetic_zed:=true
+    command: >
+      ros2 launch /ros2_ws/sim_scripts/jetson_sil_launch.py
+      use_sim_time:=${USE_SIM_TIME:-false}
+      fcu_url:=${FCU_URL:-tcp://host.docker.internal:5762}
+      use_synthetic_zed:=${USE_SYNTHETIC_ZED:-true}
+      use_zed_sim_stream:=${USE_ZED_SIM_STREAM:-false}
+      latency_ms:=${LATENCY_MS:-80.0}
+      enable_px4_2d_bridge:=${ENABLE_PX4_2D_BRIDGE:-false}
+      px4_mavlink_udp:=${PX4_MAVLINK_UDP:-none}
+      enable_mavros:=${ENABLE_MAVROS:-true}
+      verbose:=${VERBOSE:-true}
+      obstacle_dist:=${OBSTACLE_DIST:-4.0}
+
+  jetson-sil-test:
+    profiles: ["test"]
+    build:
+      context: ../..
+      dockerfile: docker/jetson-sil/Dockerfile
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-ros:humble-ros-base-jammy}
+    image: vfs-go-aero/jetson-sil:humble
+    volumes:
+      - ../../simulation:/ros2_ws/sim_scripts:ro
+    command: ["--self-test"]

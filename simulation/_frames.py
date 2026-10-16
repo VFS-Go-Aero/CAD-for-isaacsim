@@ -17,7 +17,170 @@ Q_NED_ENU    rebases a NED-world quaternion to ENU-world via similarity
 """
 import math
 
-from pxr import Gf
+try:
+    from pxr import Gf
+except ImportError:
+    class _FallbackGf:
+        """Self-contained pure-Python fallback for `pxr.Gf` (`Vec3d`, `Quatd`, `Dot`)
+        so `_frames.py` can be imported and tested in pure Python without USD/Kit.
+        """
+
+        class Vec3d:
+            __slots__ = ('_v',)
+
+            def __init__(self, x=0.0, y=0.0, z=0.0):
+                if isinstance(x, (tuple, list)) or hasattr(x, '__iter__'):
+                    vals = list(x)
+                    self._v = (float(vals[0]), float(vals[1]), float(vals[2]))
+                else:
+                    self._v = (float(x), float(y), float(z))
+
+            def __getitem__(self, idx):
+                return self._v[idx]
+
+            def __len__(self):
+                return 3
+
+            def __iter__(self):
+                return iter(self._v)
+
+            def __add__(self, other):
+                return _FallbackGf.Vec3d(
+                    self._v[0] + float(other[0]),
+                    self._v[1] + float(other[1]),
+                    self._v[2] + float(other[2]),
+                )
+
+            def __sub__(self, other):
+                return _FallbackGf.Vec3d(
+                    self._v[0] - float(other[0]),
+                    self._v[1] - float(other[1]),
+                    self._v[2] - float(other[2]),
+                )
+
+            def __neg__(self):
+                return _FallbackGf.Vec3d(-self._v[0], -self._v[1], -self._v[2])
+
+            def __mul__(self, scalar):
+                s = float(scalar)
+                return _FallbackGf.Vec3d(self._v[0] * s, self._v[1] * s, self._v[2] * s)
+
+            def __rmul__(self, scalar):
+                return self.__mul__(scalar)
+
+            def GetLength(self):
+                return math.hypot(self._v[0], self._v[1], self._v[2])
+
+            def GetNormalized(self):
+                length = self.GetLength()
+                if not math.isfinite(length) or length <= 0.0:
+                    return _FallbackGf.Vec3d(0.0, 0.0, 0.0)
+                return _FallbackGf.Vec3d(
+                    self._v[0] / length,
+                    self._v[1] / length,
+                    self._v[2] / length,
+                )
+
+            def __eq__(self, other):
+                if not hasattr(other, '__getitem__') or len(other) != 3:
+                    return False
+                return (
+                    abs(self._v[0] - float(other[0])) <= 1e-12
+                    and abs(self._v[1] - float(other[1])) <= 1e-12
+                    and abs(self._v[2] - float(other[2])) <= 1e-12
+                )
+
+            def __repr__(self):
+                return f'Gf.Vec3d({self._v[0]!r}, {self._v[1]!r}, {self._v[2]!r})'
+
+        class Quatd:
+            __slots__ = ('_real', '_imag')
+
+            def __init__(self, real=1.0, imag=None, y=None, z=None):
+                self._real = float(real)
+                if imag is None:
+                    self._imag = _FallbackGf.Vec3d(0.0, 0.0, 0.0)
+                elif y is not None and z is not None:
+                    self._imag = _FallbackGf.Vec3d(float(imag), float(y), float(z))
+                elif isinstance(imag, _FallbackGf.Vec3d):
+                    self._imag = imag
+                else:
+                    self._imag = _FallbackGf.Vec3d(imag[0], imag[1], imag[2])
+
+            def GetReal(self):
+                return self._real
+
+            def GetImaginary(self):
+                return self._imag
+
+            def GetConjugate(self):
+                return _FallbackGf.Quatd(self._real, -self._imag)
+
+            def GetInverse(self):
+                x, y, z = self._imag
+                norm = math.hypot(self._real, x, y, z)
+                if not math.isfinite(norm) or norm <= 0.0:
+                    return _FallbackGf.Quatd(1.0, _FallbackGf.Vec3d(0.0, 0.0, 0.0))
+                w_u = self._real / norm
+                x_u = x / norm
+                y_u = y / norm
+                z_u = z / norm
+                return _FallbackGf.Quatd(
+                    w_u / norm,
+                    _FallbackGf.Vec3d(-x_u / norm, -y_u / norm, -z_u / norm),
+                )
+
+            def GetNormalized(self):
+                x, y, z = self._imag
+                norm = math.hypot(self._real, x, y, z)
+                if not math.isfinite(norm) or norm <= 0.0:
+                    return _FallbackGf.Quatd(1.0, _FallbackGf.Vec3d(0.0, 0.0, 0.0))
+                return _FallbackGf.Quatd(
+                    self._real / norm,
+                    _FallbackGf.Vec3d(x / norm, y / norm, z / norm),
+                )
+
+            def Transform(self, vec):
+                v_quat = _FallbackGf.Quatd(
+                    0.0, _FallbackGf.Vec3d(vec[0], vec[1], vec[2])
+                )
+                res = self * v_quat * self.GetInverse()
+                return res.GetImaginary()
+
+            def __mul__(self, other):
+                if isinstance(other, _FallbackGf.Quatd):
+                    w1 = self._real
+                    x1, y1, z1 = self._imag
+                    w2 = other._real
+                    x2, y2, z2 = other._imag
+                    return _FallbackGf.Quatd(
+                        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                        _FallbackGf.Vec3d(
+                            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+                        ),
+                    )
+                s = float(other)
+                return _FallbackGf.Quatd(self._real * s, self._imag * s)
+
+            def __eq__(self, other):
+                if not isinstance(other, _FallbackGf.Quatd):
+                    return False
+                return (
+                    abs(self._real - other._real) <= 1e-12
+                    and self._imag == other._imag
+                )
+
+            def __repr__(self):
+                x, y, z = self._imag
+                return f'Gf.Quatd({self._real!r}, {x!r}, {y!r}, {z!r})'
+
+        @staticmethod
+        def Dot(a, b):
+            return float(a[0]) * float(b[0]) + float(a[1]) * float(b[1]) + float(a[2]) * float(b[2])
+
+    Gf = _FallbackGf
 
 
 COS45 = math.sqrt(2) / 2
@@ -28,9 +191,12 @@ Q_NED_ENU_INV = Q_NED_ENU.GetInverse()
 
 def euler_ned_to_quat(roll, pitch, yaw):
     """PX4 NED body Tait-Bryan (Z-Y-X) euler -> rotation quaternion."""
-    cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
-    cp, sp = math.cos(pitch * 0.5), math.sin(pitch * 0.5)
-    cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
+    r = float(roll) if math.isfinite(float(roll)) else 0.0
+    p = float(pitch) if math.isfinite(float(pitch)) else 0.0
+    y = float(yaw) if math.isfinite(float(yaw)) else 0.0
+    cr, sr = math.cos(r * 0.5), math.sin(r * 0.5)
+    cp, sp = math.cos(p * 0.5), math.sin(p * 0.5)
+    cy, sy = math.cos(y * 0.5), math.sin(y * 0.5)
     return Gf.Quatd(
         cr * cp * cy + sr * sp * sy,
         Gf.Vec3d(

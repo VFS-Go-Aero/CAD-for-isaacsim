@@ -25,21 +25,28 @@ characteristics.
 
 ## Prerequisites
 
-1. Isaac Sim / Isaac Lab environment is installed and working.
+1. Isaac Sim 5.1 or 6.0 / Isaac Lab environment is installed and working.
 2. The vehicle scene USD has been built:
 
 ```bash
+# Default scene with rolling-hills terrain:
 python build_scene.py --headless
+
+# Or flat ground only (z = 0.0) for altitude range verification:
+python build_scene.py --headless --no-terrain
 ```
 
 This creates `~/go_aero/vehicle_scene.usd` with the drone model,
-physics, and the `lidar_mount` Xform under the front-right prop arm.
+physics, and the `lidar_mount` Xform under the rigid `chassis` prim at
+`/World/Vehicle/chassis/lidar_mount` (positioned beneath the front-right
+arm at `(0.468, -0.04, -0.515)` so it is fixed to the airframe and never
+rotates with the spinning `prop_fr` propeller).
 
 3. Verify the mount point exists:
 
 ```bash
 # In a Python shell with Isaac Sim loaded:
-stage.GetPrimAtPath('/World/Vehicle/prop_fr/lidar_mount')
+stage.GetPrimAtPath('/World/Vehicle/chassis/lidar_mount')
 # Should return a valid Xform prim
 ```
 
@@ -64,7 +71,7 @@ Expected output:
 [TUTORIAL] Opening vehicle_scene.usd...
 [TUTORIAL] Scene loaded.
 [TUTORIAL] Creating RTX LiDAR sensor...
-[TUTORIAL] LiDAR created at: /World/Vehicle/prop_fr/lidar_mount/lidar_sensor
+[TUTORIAL] LiDAR created at: /World/Vehicle/chassis/lidar_mount/lidar_sensor
 [TUTORIAL] Config: Example_Rotary
 [TUTORIAL] Setting up LiDAR data pipeline...
 [TUTORIAL] LiDAR data pipeline ready.
@@ -73,18 +80,32 @@ Expected output:
 [TUTORIAL] Duration: 10.0s
 [TUTORIAL] Running...
 
-[LIDAR] step=  250  points= 4812  min=1.48m  mean=1.95m  max=3.41m
-[HOVER] step=  250  altitude=1.98m  target=2.0m
+[LIDAR] step=  250  points= 4812  min=1.96m  mean=2.12m  max=3.41m
+[HOVER] step=  250  altitude=2.00m  target=2.0m
+[MOUNT] step=  250  lidar_mount vs chassis drift: pos=0.000000m  rot=0.0000deg (FIXED to chassis)
 ...
 ============================================================
   LiDAR Tutorial — Summary
 ============================================================
   Total physics steps:    2500
+  LiDAR sensor path:      /World/Vehicle/chassis/lidar_mount/lidar_sensor
   LiDAR reads:            100
-  Total points collected:  481200
-  Closest point ever:     1.47m
+  Total points collected: 481200
+  Closest point ever:     1.96m
+  Steady-state nadir:     1.96m (flat-ground hover_z - 0.04m = 1.96m, diff=0.040m <= 0.05m) [PASS: within ±0.05m of hover]
+  Mount pose drift:       pos=0.000000m, rot=0.0000deg [PASS: fixed to chassis]
 ============================================================
 ```
+
+> **Why is `lidar_mount` parented to `chassis` instead of `prop_fr`?**
+> In the USD articulation, `/World/Vehicle/prop_fr` is a revolute-jointed rigid
+> body that rotates at motor RPM on every physics step. Parenting any sensor to
+> a propeller prim causes the sensor's coordinate frame to spin with the motor!
+> Mounting under `/World/Vehicle/chassis/lidar_mount` at mesh coordinates
+> `(0.468, -0.04, -0.515)` places the LiDAR at the exact same physical location
+> beneath the front-right arm (`4 cm` below the chassis origin), keeping the
+> sensor rigidly fixed to the airframe and ensuring flat-ground downward range
+> matches hover altitude within `±5 cm` (`1.96 m` at `2.00 m` hover).
 
 ## Using LiDAR with the PX4 bridge
 
@@ -94,9 +115,9 @@ The full HIL bridge also supports LiDAR via the `--lidar` flag:
 python px4_bridge.py --device cuda --lidar
 ```
 
-This attaches the same RTX LiDAR sensor and prints distance data
-alongside the normal sensor telemetry. The flag is optional — omitting
-it preserves the existing sensor-only workflow.
+This attaches the same RTX LiDAR sensor at `/World/Vehicle/chassis/lidar_mount/lidar_sensor`
+and prints distance data alongside the normal sensor telemetry. The flag is
+optional — omitting it preserves the existing sensor-only workflow.
 
 ## Code walkthrough
 
@@ -111,14 +132,14 @@ Isaac Sim sensor types (Rotary vs. Solid State).
 ### Section 2 — Launch Isaac Sim and load the scene
 
 ```python
-from isaaclab.app import AppLauncher
+from _compat import add_app_launcher_args, launch_app
 # ... parse args, launch app ...
 omni.usd.get_context().open_stage('~/go_aero/vehicle_scene.usd')
 ```
 
-Isaac Sim must be launched (via `AppLauncher`) before importing any
-`omni.*` modules. The stage loading loop waits until all USD assets
-are fully composed.
+Isaac Sim must be launched (via `AppLauncher` or `SimulationApp`) before
+importing any `omni.*` modules. The stage loading loop waits until all USD
+assets are fully composed.
 
 ### Section 3 — Create the LiDAR sensor prim
 
@@ -128,7 +149,7 @@ import omni.kit.commands
 result, lidar_prim = omni.kit.commands.execute(
     'IsaacSensorCreateRtxLidar',
     path='/lidar_sensor',
-    parent='/World/Vehicle/prop_fr/lidar_mount',
+    parent='/World/Vehicle/chassis/lidar_mount',
     config='Example_Rotary',
     translation=(0, 0, 0),
     orientation=Gf.Quatd(1, 0, 0, 0),
@@ -136,8 +157,9 @@ result, lidar_prim = omni.kit.commands.execute(
 ```
 
 The `IsaacSensorCreateRtxLidar` command creates a Camera-type prim with
-special LiDAR attributes. It is parented to the mount Xform, which
-already has a `RotateX(180)` so the sensor faces downward.
+special LiDAR attributes. It is parented to `/World/Vehicle/chassis/lidar_mount`,
+which has `RotateX(180)` so the sensor's local `+Y` axis points straight down
+(`-Z` world) and `Example_Rotary`'s XY scan plane sweeps vertically beneath the arm.
 
 ### Section 4 — Configure the sensor
 
@@ -164,10 +186,12 @@ Two components are needed to read LiDAR data:
 2. **Annotator** — converts raw render output into a structured NumPy
    array of `(x, y, z)` points in the sensor's local frame.
 
-### Section 6 — Run simulation and read data
+### Section 6 — Run simulation, verify mount stability, and read data
 
-The main loop combines a PID hover controller (same as `open_scene.py`)
-with periodic LiDAR reads:
+The main loop combines a PID hover controller on `/World/Vehicle/chassis`
+with periodic LiDAR reads and a relative-pose verification check confirming
+that `lidar_mount` stays stationary relative to `chassis` while the
+propellers spin:
 
 ```python
 buf = lidar_annotator.get_data()
@@ -203,18 +227,19 @@ by modifying attributes on the sensor prim after creation.
 
 ### Exercise 1: Change the LiDAR position
 
-Mount the LiDAR under a different prop arm (e.g., `prop_fl`).
+Mount the LiDAR under the front-left arm on the rigid `chassis` (never under a
+spinning propeller prim like `prop_fl`!).
 
-1. In `build_scene.py`, add a new mount Xform:
+1. In `build_scene.py`, add a new mount Xform under `/World/Vehicle/chassis`:
    ```python
-   mount = UsdGeom.Xform.Define(stage, '/World/Vehicle/prop_fl/lidar_mount')
-   mount.AddTranslateOp().Set(Gf.Vec3d(0, -0.15, 0))
-   mount.AddRotateXOp().Set(180.0)
+   mount_fl = ensure_xform_pose(
+       stage, '/World/Vehicle/chassis/lidar_mount_fl', (-0.468, -0.04, -0.515), rotate_x_deg=180.0
+   )
    ```
 2. Rebuild the scene: `python build_scene.py --headless`
 3. In the tutorial script, change the `parent` parameter:
    ```python
-   parent='/World/Vehicle/prop_fl/lidar_mount',
+   parent='/World/Vehicle/chassis/lidar_mount_fl',
    ```
 4. Run and compare the point cloud — is it different?
 
@@ -233,11 +258,14 @@ Observe the differences:
 
 Create a second LiDAR for obstacle detection:
 
-1. Add a forward-facing mount under the chassis (no 180-degree flip):
+1. Add a forward-facing mount under the chassis using identity rotation
+   (`RotateX(0.0)`, since `/World/Vehicle` already has `RotateX(90.0)` so
+   local `-Z` already points forward along `+Y_world`):
    ```python
    fwd_mount = UsdGeom.Xform.Define(stage, '/World/Vehicle/chassis/lidar_fwd')
+   fwd_mount.ClearXformOpOrder()
    fwd_mount.AddTranslateOp().Set(Gf.Vec3d(0, 0, -0.3))  # front of chassis
-   fwd_mount.AddRotateXOp().Set(90.0)  # tilt forward
+   fwd_mount.AddRotateXOp().Set(0.0)  # identity rotation: local -Z points forward along +Y_world
    ```
 2. Create a second sensor, render product, and annotator.
 3. Read both point clouds and compare: one shows the ground, the other
@@ -282,20 +310,21 @@ build_scene.py                    px4_bridge.py / tutorial script
 Creates USD prims:                At runtime:
   /World/Vehicle/                   1. Loads vehicle_scene.usd
     chassis/                        2. Creates RTX LiDAR sensor
-      chassis_IMU  ←── IMU mount       on the mount prim
-    prop_fr/                        3. Attaches render product
-      lidar_mount  ←── LiDAR mount     + annotator
-    prop_fl/                        4. Physics loop:
-    prop_rr/                           - Steps PhysX
-    prop_rl/                           - Reads IMU, GPS, baro, mag
-                                       - Reads LiDAR point cloud
-                                       - Sends to PX4 / prints data
+      chassis_IMU  ←── IMU mount       on /World/Vehicle/chassis/lidar_mount
+      lidar_mount  ←── LiDAR mount  3. Attaches render product
+      zed1_mount   ←── ZED #1 mount    + annotator
+      zed2_mount   ←── ZED #2 mount 4. Physics loop:
+    prop_fr/                           - Steps PhysX (spins prop_fr..rl)
+    prop_fl/                           - Reads IMU, GPS, baro, mag
+    prop_rr/                           - Reads LiDAR point cloud
+    prop_rl/                           - Sends to PX4 / prints data
 ```
 
-The pattern is the same for all sensors: **create a mount prim in the
-USD at build time, attach the sensor at runtime.** This separation
-keeps the USD file clean and lets you swap sensor configurations
-without rebuilding the scene.
+The pattern is the same for all sensors: **create a mount prim on the rigid
+`chassis` in the USD at build time, attach the sensor at runtime.** This
+separation keeps the USD file clean, prevents sensors from spinning with
+propeller joints, and lets you swap sensor configurations without rebuilding
+the scene.
 
 ## Reference
 

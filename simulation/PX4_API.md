@@ -10,10 +10,10 @@ For the bigger picture, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 | Library | Layer | Used by | Use for |
 |---|---|---|---|
-| **`pymavlink`** (`mavutil`) | low — raw MAVLink frames | `px4_visualizer.py`, `px4_bridge.py` | Sensor sim, raw telemetry, HIL |
+| **`pymavlink`** (`mavutil`) | low — raw MAVLink frames | `px4_visualizer.py`, `px4_bridge.py`, `latency_relay.py` | Sensor sim, raw telemetry, HIL, 72-sector `OBSTACLE_DISTANCE` |
 | **`mavsdk`** (Python async) | high — fluent commands | `fly_demo.py` | Mission scripts, autonomous behaviors |
 
-Both can run against the same PX4 instance simultaneously — PX4 SITL exposes them on different UDP ports.
+Both can run against the same PX4 instance simultaneously — PX4 SITL exposes them on different ports.
 
 ---
 
@@ -21,11 +21,28 @@ Both can run against the same PX4 instance simultaneously — PX4 SITL exposes t
 
 | Port | Direction | Protocol | Purpose | Code |
 |---|---|---|---|---|
-| **14540** | PX4 → client | UDP | MAVSDK / offboard control | `fly_demo.py` connects with `udpin://0.0.0.0:14540` |
-| **14550** | PX4 → ground station | UDP | Telemetry stream | `px4_visualizer.py` listens with `udpin:0.0.0.0:14550` |
-| **14560** | bidirectional | UDP | HIL (sensors in, motors out) | `px4_bridge.py` uses both `udpout` and `udpin` on 14560 |
+| **14540** | PX4 (`:14580`) → client (`:14540`) | UDP | MAVSDK / offboard / MAVROS control | `fly_demo.py` connects with `udpin://0.0.0.0:14540` |
+| **14550** | PX4 (`:18570`) → ground station (`:14550`) | UDP | Primary telemetry stream (visualizer) | `px4_visualizer.py` binds `udpin:0.0.0.0:14550` |
+| **14601** *(optional)* | PX4 (`:14600`) → 2nd GCS (`:14601`) | UDP | Secondary GCS (QGroundControl / Mission Planner) | `mavlink start -x -u 14600 -o 14601 -r 4000000` |
+| **4560** | bidirectional (PX4 client → bridge server) | **TCP** (default) or UDP | HIL (`HIL_SENSOR` / `HIL_GPS` in, `HIL_ACTUATOR_CONTROLS` out) | `px4_bridge.py` listens on `tcpin:0.0.0.0:4560` (or `udpin:0.0.0.0:4560` with `--protocol udp`) |
 
-PX4 publishes to all enabled outputs simultaneously, so MAVSDK + visualizer can run together without conflict.
+PX4 publishes to all enabled outputs simultaneously, so MAVSDK (`14540`) + `px4_visualizer.py` (`14550`) can run together without conflict.
+
+### Running a Second GCS (QGroundControl / Mission Planner) Alongside `px4_visualizer.py`
+
+In upstream PX4 SITL (`px4-rc.mavlink`), the default GCS link binds local UDP port `18570` and **sends to** remote UDP port `14550`. `px4_visualizer.py` is the process that **binds** `0.0.0.0:14550` (`udpin:0.0.0.0:14550`).
+
+If you also launch QGroundControl or Mission Planner listening on UDP `14550`, it will conflict with `px4_visualizer.py` (either failing to bind `14550` or stealing telemetry packets so the visualizer freezes). To avoid stealing UDP `14550`, add a dedicated MAVLink UDP instance in the PX4 shell (or in `ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink`):
+
+```sh
+# Inside the running px4 shell (or appended to px4-rc.mavlink):
+mavlink start -x -u 14600 -o 14601 -r 4000000
+mavlink stream -u 14600 -s ATTITUDE -r 50
+mavlink stream -u 14600 -s LOCAL_POSITION_NED -r 50
+mavlink stream -u 14600 -s GLOBAL_POSITION_INT -r 20
+```
+
+Here `-u 14600` is PX4's local source port and `-o 14601` is the destination port where QGroundControl / Mission Planner listens.
 
 ---
 
@@ -39,11 +56,18 @@ from pymavlink import mavutil
 # Listen for telemetry from PX4 (visualizer mode)
 mav = mavutil.mavlink_connection('udpin:0.0.0.0:14550')
 
-# Send sensors to PX4 (HIL mode, bridge)
-mav = mavutil.mavlink_connection('udpout:127.0.0.1:14560', source_system=1, source_component=1)
+# Bidirectional HIL socket (bridge mode)
+# PX4's simulator_mavlink module runs `simulator_mavlink start -c 4560` in
+# px4-rc.mavlinksim and dials out as a TCP client, so the bridge listens with tcpin.
+# Pass --protocol udp (`udpin:0.0.0.0:4560`) only if px4-rc.mavlinksim is patched with `-u`.
+mav = mavutil.mavlink_connection(
+    'tcpin:0.0.0.0:4560',
+    source_system=1,
+    source_component=mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1,
+)
 ```
 
-After connecting, **always wait for a heartbeat first** to learn the target system/component IDs:
+After connecting, **always wait for a heartbeat first** to learn the target system/component IDs (note: in HIL bridge mode on port 4560, `px4_bridge.py` sends a 1 Hz `HEARTBEAT` and `px4_connected` wakes on the first `HEARTBEAT` or `HIL_ACTUATOR_CONTROLS` message from PX4):
 
 ```python
 mav.wait_heartbeat(timeout=30)
@@ -122,20 +146,20 @@ is_armed = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
 
 ### Messages we currently send (us → PX4)
 
-These are sent by `px4_bridge.py` for HIL mode:
+These are sent by `px4_bridge.py` (for HIL mode) and `latency_relay.py` (for PX4 Collision Prevention):
 
 #### `HIL_SENSOR` — IMU + baro + mag (250 Hz)
 ```python
 mav.mav.hil_sensor_send(
     timestamp_us,
-    xacc, yacc, zacc,            # m/s^2 (body frame)
-    xgyro, ygyro, zgyro,         # rad/s
-    xmag, ymag, zmag,            # Gauss
+    xacc, yacc, zacc,            # m/s^2 (body frame, FRD)
+    xgyro, ygyro, zgyro,         # rad/s (FRD)
+    xmag, ymag, zmag,            # Gauss (FRD)
     abs_pressure,                # hPa
     diff_pressure,               # hPa
     pressure_altitude,           # m
     temperature,                 # °C
-    fields_updated,              # bitmask: 0x1FF = all sensors
+    fields_updated,              # bitmask: 0x1FFF = all 13 fields
     id,                          # sensor instance (0)
 )
 ```
@@ -156,10 +180,23 @@ mav.mav.hil_gps_send(
 )
 ```
 
+#### `OBSTACLE_DISTANCE` — 72-sector 2D obstacle array (10 Hz, via `latency_relay.py`)
+```python
+mav.mav.obstacle_distance_send(
+    time_usec,
+    0,                           # MAV_DISTANCE_SENSOR_LASER
+    distances_cm,                # 72-element list[int] in cm (5 deg CW sectors from +X_frd)
+    5,                           # increment (deg)
+    20, 500,                     # min_distance, max_distance (cm)
+    5.0, 0.0,                    # increment_f, angle_offset
+    12,                          # MAV_FRAME_BODY_FRD
+)
+```
+
 #### `HEARTBEAT` — keep-alive (1 Hz)
 ```python
 mav.mav.heartbeat_send(
-    mavutil.mavlink.MAV_TYPE_GCS,
+    mavutil.mavlink.MAV_TYPE_GENERIC,
     mavutil.mavlink.MAV_AUTOPILOT_INVALID,
     0, 0, 0,
 )
@@ -367,16 +404,16 @@ param set-default CA_AIRFRAME 0           # Quadrotor X
 param set-default CA_ROTOR_COUNT 4
 
 # Per-motor X/Y position (m, body frame) and torque coefficient
-param set-default CA_ROTOR0_PX  0.515     # Front-Right (CW)
+param set-default CA_ROTOR0_PX  0.515     # Motor 1: Front-Right (CCW)
 param set-default CA_ROTOR0_PY  0.468
 param set-default CA_ROTOR0_KM  0.05
-param set-default CA_ROTOR1_PX -0.515     # Rear-Right (CCW)
+param set-default CA_ROTOR1_PX -0.515     # Motor 2: Rear-Right (CW)
 param set-default CA_ROTOR1_PY  0.468
 param set-default CA_ROTOR1_KM -0.05
-param set-default CA_ROTOR2_PX -0.515     # Rear-Left (CW)
+param set-default CA_ROTOR2_PX -0.515     # Motor 3: Rear-Left (CCW)
 param set-default CA_ROTOR2_PY -0.468
 param set-default CA_ROTOR2_KM  0.05
-param set-default CA_ROTOR3_PX  0.515     # Front-Left (CCW)
+param set-default CA_ROTOR3_PX  0.515     # Motor 4: Front-Left (CW)
 param set-default CA_ROTOR3_PY -0.468
 param set-default CA_ROTOR3_KM -0.05
 
@@ -385,9 +422,10 @@ param set-default PWM_MAIN_FUNC2 102
 param set-default PWM_MAIN_FUNC3 103
 param set-default PWM_MAIN_FUNC4 104
 
-param set-default SENS_EN_GPSSIM 1        # use simulated GPS
-param set-default SENS_EN_BAROSIM 1       # use simulated barometer
-param set-default SENS_EN_MAGSIM 1        # use simulated magnetometer
+param set-default SYS_HITL 1              # HIL mode: external simulator provides sensors
+param set-default SENS_EN_GPSSIM 0        # disable internal simulated GPS
+param set-default SENS_EN_BAROSIM 0       # disable internal simulated barometer
+param set-default SENS_EN_MAGSIM 0        # disable internal simulated magnetometer
 ```
 
 To change motor positions/spin direction, edit `~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/10050_none_go_aero` and rebuild PX4 (`make px4_sitl`).
