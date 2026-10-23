@@ -1,0 +1,55 @@
+{
+  "_comment": "Power-budget config for px4_bridge.py --power-sim / power_model.py. Every value is a PLACEHOLDER - replace with datasheet numbers. Keys starting with _ are ignored. Omitted keys keep their defaults; unknown keys are an error.",
+
+  "battery": {
+    "_comment": "End-of-flight scenario: start at 30% and drain 5x faster so a ~2 min HIL flight covers the bottom of the discharge curve.",
+    "cells": 6,
+    "capacity_ah": 10.0,
+    "cell_r_ohm": 0.004,
+    "harness_r_ohm": 0.010,
+    "initial_soc": 0.30,
+    "drain_speedup": 5.0
+  },
+
+  "propulsion": {
+    "prop_diameter_m": 0.81,
+    "figure_of_merit": 0.70,
+    "drive_efficiency": 0.80,
+    "air_density": 1.225
+  },
+
+  "avionics": {
+    "power_w": 10.0
+  },
+
+  "regulator": {
+    "_comment": "Buck converter from the main bus to the Jetson carrier input.",
+    "output_v": 12.0,
+    "dropout_v": 1.0,
+    "efficiency": 0.90
+  },
+
+  "jetson": {
+    "_comment": "Set power_w from tegrastats on the real unit at your nvpmodel mode, plus peripherals. min_input_v comes from the carrier board datasheet.",
+    "power_w": 25.0,
+    "min_input_v": 9.0,
+    "holdup_uf": 1000.0,
+    "boot_time_s": 30.0,
+    "restart_margin_v": 0.5
+  },
+
+  "faults": {
+    "_comment": "Times are seconds after PX4 first arms. Overlapping events do not stack: the largest active drop applies at the regulator input.",
+    "steps": [
+      {"t_start_s": 45.0, "duration_s": 0.2, "drop_v": 14.0}
+    ],
+    "transients": {
+      "rate_hz": 0.5,
+      "drop_v_min": 2.0,
+      "drop_v_max": 10.0,
+      "duration_ms_min": 1.0,
+      "duration_ms_max": 20.0,
+      "seed": 1
+    }
+  }
+}

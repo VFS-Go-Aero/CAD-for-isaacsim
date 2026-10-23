@@ -169,6 +169,7 @@ The full HIL bridge. Two threads, same shape as the visualizer, but the data flo
 7. Read the latest clamped motor commands, compute body-frame thrust `F_body += (0, T_i, 0)`, cross-product moment `M_body += r_body × F_i`, and reaction yaw `M_body.y -= K_TAU * T_i * spin_dir`
 8. Rotate body-frame force/torque into world frame with the chassis quaternion and push via `chassis.apply_forces_and_torques_at_pos(is_global=True, positions=None)`
 9. Separately set each prop joint's `DriveAPI:angular` target velocity for the visual spin — decoupled from the force model so joint behaviour doesn't bleed into flight dynamics
+10. With `--power-sim`, pass the per-motor thrusts and arm state to `power_model.PowerModel.step()` (battery → regulator → Jetson brownout model). This is read-only with respect to flight: nothing flows back into forces or PX4
 
 Timing: MAVLink timestamps use `timeline.get_current_time()` (sim seconds) rather than wall-clock so the sensor stream stays consistent even when the viewport stutters. The bridge blocks on `px4_connected.wait()` before the first sensor packet is sent — this is the "connect-ready gate" that replaces `wait_heartbeat()`.
 

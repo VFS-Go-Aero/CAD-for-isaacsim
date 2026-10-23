@@ -256,7 +256,8 @@ git checkout sgoss/isaac-sim-import
 mkdir -p ~/go_aero/meshes
 cp meshes/* ~/go_aero/meshes/
 cp simulation/build_scene.py simulation/open_scene.py simulation/px4_visualizer.py \
-   simulation/fly_demo.py simulation/px4_bridge.py ~/go_aero/
+   simulation/fly_demo.py simulation/px4_bridge.py simulation/_frames.py \
+   simulation/power_model.py ~/go_aero/
 
 # Build the USD scene (headless, takes ~60s)
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -336,6 +337,7 @@ asyncio.run(run())
 | `simulation/px4_visualizer.py` | Reads PX4 state via MAVLink, updates Isaac Sim |
 | `simulation/fly_demo.py` | MAVSDK script: takeoff, fly square, land |
 | `simulation/px4_bridge.py` | MAVLink bridge (for future HIL mode) |
+| `simulation/power_model.py` | Battery sag + Jetson brownout power-budget model (`px4_bridge.py --power-sim`) |
 | `simulation/ARCHITECTURE.md` | Process topology, data flow, coordinate frames |
 | `simulation/PX4_API.md` | MAVLink + MAVSDK reference for the simulation |
 

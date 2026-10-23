@@ -35,6 +35,8 @@ CAD-for-isaacsim/
 │   ├── open_scene.py          open scene with PID hover controller (no PX4)
 │   ├── px4_visualizer.py      mirror PX4 SIH pose into Isaac Sim   (default mode)
 │   ├── px4_bridge.py          full HIL bridge (sensors out, motors in)
+│   ├── power_model.py         battery + Jetson brownout model (px4_bridge.py --power-sim)
+│   ├── power_config.example.json  template config for power_model.py
 │   ├── joystick_control.py    (Phase 2) Xbox controller → MANUAL_CONTROL to PX4
 │   └── fly_demo.py            MAVSDK script: takeoff, fly square, land
 ├── meshes/                    STL files: frame.stl, FR.stl, FL.stl, BR.stl, BL.stl
@@ -56,6 +58,7 @@ CAD-for-isaacsim/
     ├── open_scene.py
     ├── px4_visualizer.py
     ├── px4_bridge.py
+    ├── power_model.py
     └── fly_demo.py
 ```
 
@@ -108,7 +111,7 @@ nano px4_visualizer.py         # or vim/code-server
 # When happy, copy back into the repo clone
 cd ~/go_aero_repo               # the cloned CAD-for-isaacsim
 git checkout sgoss/isaac-sim-import
-cp ~/go_aero/{build_scene,open_scene,px4_visualizer,px4_bridge,fly_demo,_frames}.py simulation/
+cp ~/go_aero/{build_scene,open_scene,px4_visualizer,px4_bridge,fly_demo,_frames,power_model}.py simulation/
 
 # Commit and push
 git add simulation/
@@ -172,6 +175,7 @@ Then restart the PX4 terminal.
 | `px4_visualizer.py` | USD scene + MAVLink UDP `:14550` | viewport | PX4 SIH |
 | `px4_bridge.py` | USD scene + MAVLink UDP `:4560` (bidirectional) | HIL_SENSOR / HIL_GPS out, HIL_ACTUATOR_CONTROLS in | PX4 SITL (HIL mode) |
 | `fly_demo.py` | — | MAVSDK UDP `:14540` | PX4 (offboard) |
+| `power_model.py` | JSON power config + per-motor thrust from `px4_bridge.py` | optional CSV log + summary | — (imported by the bridge, or standalone) |
 | `joystick_control.py` | Xbox controller (USB) | MAVLink `MANUAL_CONTROL` over UDP `:14550` | PX4 GCS endpoint |
 
 See [PX4_API.md](./PX4_API.md) for the MAVLink message and MAVSDK method details, and [ARCHITECTURE.md](./ARCHITECTURE.md) for the full data flow.
@@ -283,6 +287,83 @@ The bridge exposes four tuning knobs at the top of `px4_bridge.py`:
 | `SENSOR_RATE` | `250` Hz | Physics step rate + HIL_SENSOR send rate. Keep them equal |
 
 Inertia and mass live in `build_scene.py` — edit `mass_api.CreateMassAttr` / `CreateDiagonalInertiaAttr` and rebuild the scene.
+
+---
+
+## HIL Bridge — Jetson Power Budget (`--power-sim`)
+
+Simulates the battery and the Jetson companion computer's supply during a HIL flight. It shows whether a given battery, harness, regulator and hold-up capacitor keep the Jetson powered through gradual sag, scripted brownouts and random voltage transients. `power_model.py` implements it.
+
+```
+battery: OCV(SoC), R_cells
+  └─ harness R ── main bus ─┬─ 4x ESC + motor  (power from the bridge's per-motor thrust)
+                            ├─ other avionics  (constant W)
+                            └─ [injected drop] ─ buck regulator ─ hold-up cap ─ Jetson
+```
+
+The model is **observational**. It reads motor thrust but never feeds voltage back into thrust or PX4, so enabling it doesn't change how the vehicle flies. PX4's own battery readout is separate and unaffected.
+
+### Run it
+
+```bash
+cp ~/go_aero_repo/simulation/power_config.example.json ~/go_aero/power_config.json   # then edit
+python ~/go_aero/px4_bridge.py --device cuda --power-sim \
+    --power-config ~/go_aero/power_config.json --power-log ~/go_aero/power_log.csv
+```
+
+`--power-sim` alone uses the built-in placeholder values. The bridge status line gains `bus=…V soc=…% jetson=ON|BOOTING|OFF`, and stopping the bridge (Ctrl-C) prints a summary like this:
+
+```
+[POWER] bus voltage      min 19.25 V at t=149.8s
+[POWER] regulator input  min 7.98 V (including injected drops)
+[POWER] Jetson headroom  min +1.03 V vs its 9 V cutoff
+[POWER] hold-up time     1.26 ms at 25 W (1000 uF)
+[POWER] Jetson brownouts 1 (first at t=45.0s), downtime 30.2 s
+[POWER] verdict          FAIL: see brownouts / collapse above
+```
+
+A `VOLTAGE COLLAPSE` line means the pack plus harness can't deliver the load at all (past its maximum power point), so the battery or wiring is undersized.
+
+**Quick sweeps without Isaac Sim.** `power_model.py` also runs standalone at constant hover thrust in under a second, with no GPU or PX4. It exits with status 1 on a FAIL, so you can script it:
+
+```bash
+python simulation/power_model.py --config simulation/power_config.example.json --duration 600
+python simulation/power_model.py --dt 0.0001 ...   # finer step to resolve sub-4 ms transients
+```
+
+### What it models
+
+| Part | Model | Key config |
+|---|---|---|
+| Battery | OCV-vs-SoC table (generic LiPo by default) minus `I × (cells × cell_r_ohm + harness_r_ohm)`; constant-power loads, so current rises as voltage sags | `battery.*` |
+| Motors | Momentum theory `P = T^1.5 / sqrt(2ρA) / (FM × η_drive)` per rotor, using the same thrust the bridge applies to PhysX | `propulsion.*` |
+| Regulator | Buck: holds `output_v` until input < `output_v + dropout_v`, then output tracks input | `regulator.*` |
+| Hold-up | Capacitor at the Jetson input rides through dips shorter than `C (V² − Vmin²) / 2P` | `jetson.holdup_uf` |
+| Jetson | Browns out when its input < `min_input_v`, then reboots for `boot_time_s` once supply is back above `min_input_v + restart_margin_v` | `jetson.*` |
+
+### Voltage events
+
+All are configured under `faults` in the JSON. They subtract volts at the regulator input. Fault times count from when **PX4 first arms**, so they line up with the flight. Overlapping events don't stack: the largest active drop applies.
+
+| Profile | How |
+|---|---|
+| Gradual sag | Emerges from load + discharge. Set `battery.initial_soc` low for an end-of-flight test, and `battery.drain_speedup` > 1 to squeeze a full discharge into a short sim |
+| Step brownout | `faults.steps`: list of `{t_start_s, duration_s, drop_v}` |
+| Random transients | `faults.transients`: Poisson arrivals at `rate_hz`, drop and duration uniform in `[min, max]`, reproducible via `seed` |
+
+Events are applied for whole steps, so at the bridge's 250 Hz anything shorter than 4 ms counts as 4 ms. That errs on the conservative side for sizing. Use the standalone runner with a smaller `--dt` to resolve shorter transients.
+
+### Filling in real numbers
+
+Every default is a **placeholder**, and the verdict means nothing until these are real:
+
+- **Jetson `power_w`**: measure with `tegrastats` on the real unit at your `nvpmodel` mode under your actual workload, and add cameras, NVMe and USB devices. Approximate NVIDIA module envelopes are Orin Nano 7–25 W, Orin NX 10–40 W and AGX Orin 15–60 W, depending on module variant and power mode.
+- **Jetson `min_input_v`, `holdup_uf`**: from the carrier board datasheet, or measure them.
+- **Battery**: cell count, capacity, per-cell DC internal resistance and the datasheet OCV curve (`battery.ocv_table`, `[[soc, cell_v], ...]` from 0 to 1).
+- **Regulator**: output voltage, dropout and efficiency from the converter datasheet.
+- **Propulsion**: once real prop and motor data exist, also update `MAX_THRUST_PER_MOTOR` in `px4_bridge.py`.
+
+The config loader accepts plain JSON only and is strict. Unknown keys, wrong types, `NaN`/`Infinity` and out-of-range values are rejected before Isaac Sim boots, so a typo can't silently fall back to a default. Keys starting with `_` are treated as comments.
 
 ---
 

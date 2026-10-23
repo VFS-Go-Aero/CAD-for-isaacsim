@@ -60,7 +60,31 @@ parser.add_argument('--no-noise', action='store_true',
                     help='Disable Gaussian sensor noise (useful for debugging)')
 parser.add_argument('--lidar', action='store_true',
                     help='Attach a downward-facing RTX LiDAR under prop_fr')
+parser.add_argument('--power-sim', action='store_true',
+                    help='Simulate battery sag and Jetson companion brownouts '
+                         '(observational; does not change flight dynamics)')
+parser.add_argument('--power-config', type=str, default=None,
+                    help='JSON power config for --power-sim '
+                         '(see power_config.example.json; default: built-in placeholders)')
+parser.add_argument('--power-log', type=str, default=None,
+                    help='Write a per-step power CSV log here (requires --power-sim)')
+AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+if (args.power_config or args.power_log) and not args.power_sim:
+    parser.error('--power-config / --power-log require --power-sim')
+
+# Load the power model before the ~90 s Isaac Sim boot so a bad config or
+# log path fails fast. power_model.py is pure Python (no omni imports).
+power = None
+if args.power_sim:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import power_model
+    try:
+        power = power_model.PowerModel(power_model.load_config(args.power_config),
+                                       log_path=args.power_log)
+    except (OSError, ValueError) as e:
+        parser.error(f'--power-sim: {e}')
+
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
@@ -397,6 +421,7 @@ print('[INFO] PX4 connected. Bridge running.', flush=True)
 # if the viewport lags momentarily.
 last_gps_tick = 0.0
 last_hb_tick = 0.0
+power_prev_t = None
 step = 0
 
 # render_period_steps is reserved for future use when we switch the loop
@@ -527,12 +552,15 @@ try:
         # --------------------------------------------------
         with motor_lock:
             cmds = list(motor_commands)
+            is_armed = armed
 
         # Compute net force and moment in mesh-body frame.
         F_body = np.zeros(3)
         M_body = np.zeros(3)
+        thrusts = []
         for i, name in enumerate(PROP_ORDER):
             T_i = MAX_THRUST_PER_MOTOR * (cmds[i] ** 2)
+            thrusts.append(T_i)
             r_body = PROP_LAYOUT[name]['pos_body']
             F_i = np.array([0.0, T_i, 0.0])  # mesh +Y = body up
             F_body += F_i
@@ -560,6 +588,17 @@ try:
         )
 
         # --------------------------------------------------
+        # Battery / Jetson power model (optional, observational)
+        # --------------------------------------------------
+        # Step by the sim-time delta rather than SIM_DT: the scene's
+        # PhysicsScene, not this loop, sets the real physics dt.
+        if power is not None:
+            power_dt = SIM_DT if power_prev_t is None else sim_time - power_prev_t
+            power_prev_t = sim_time
+            if power_dt > 0.0:
+                power.step(power_dt, thrusts, is_armed)
+
+        # --------------------------------------------------
         # LiDAR point cloud read (optional)
         # --------------------------------------------------
         if lidar_annotator is not None and step % LIDAR_READ_INTERVAL == 0:
@@ -585,18 +624,20 @@ try:
         # --------------------------------------------------
         if step % (SENSOR_RATE * 2) == 0:
             avg = sum(cmds) / 4.0
-            with motor_lock:
-                is_armed = armed
+            power_status = f'  {power.status()}' if power is not None else ''
             print(
                 f'[INFO] t={sim_time:6.2f}s  z={pos_w[2]:+.2f}m  '
                 f'armed={is_armed}  motors=[{cmds[0]:.2f},{cmds[1]:.2f},'
-                f'{cmds[2]:.2f},{cmds[3]:.2f}] avg={avg:.2f}',
+                f'{cmds[2]:.2f},{cmds[3]:.2f}] avg={avg:.2f}{power_status}',
                 flush=True,
             )
 
 except KeyboardInterrupt:
     print('[INFO] SIGINT received, stopping...', flush=True)
 
+# Before simulation_app.close(), which may exit the process.
+if power is not None:
+    power.close()
 timeline.stop()
 try:
     mav.close()
