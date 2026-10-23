@@ -225,18 +225,20 @@ for name, info in props.items():
     drive.CreateTargetVelocityAttr(0.0)
 
 # ============================================================
-# LiDAR mount point — child Xform under the front-right prop arm.
-# Positioned 15 cm below the arm center (mesh-body -Y = downward
-# before the vehicle's RotateX(90)). The RotateX(180) flips the
-# sensor's local Z-axis so it points toward the ground, which is
-# the default ray-cast direction for Isaac Sim RTX LiDAR sensors.
-# The actual sensor prim is created at runtime by px4_bridge.py
-# (or the tutorial script) using IsaacSensorCreateRtxLidar.
+# LiDAR mount point — child Xform under the chassis, not a propeller.
+# prop_fr spins, and a child of that prim would spin with it.
+# Translate (0.468, -0.04, -0.515) sits on the front-right arm
+# (prop_fr is at X=0.468, Z=-0.515) and 4 cm below the chassis origin.
+# Mesh -Y is down before the vehicle's RotateX(90), so that 4 cm keeps
+# a downward range on flat ground within 5 cm of hover altitude.
+# RotateX(180) aims the sensor's local +Z at the ground, the default
+# ray direction for Isaac Sim RTX LiDAR. The sensor prim is created
+# at runtime by px4_bridge.py or the tutorial script.
 # ============================================================
-lidar_mount = UsdGeom.Xform.Define(stage, '/World/Vehicle/prop_fr/lidar_mount')
-lidar_mount.AddTranslateOp().Set(Gf.Vec3d(0, -0.15, 0))
+lidar_mount = UsdGeom.Xform.Define(stage, '/World/Vehicle/chassis/lidar_mount')
+lidar_mount.AddTranslateOp().Set(Gf.Vec3d(0.468, -0.04, -0.515))
 lidar_mount.AddRotateXOp().Set(180.0)
-print('[BUILD] Added lidar_mount under prop_fr')
+print('[BUILD] Added lidar_mount under chassis')
 
 print('[BUILD] Physics setup complete.')
 

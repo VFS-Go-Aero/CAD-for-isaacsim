@@ -72,7 +72,7 @@ print("Done:", list(whl.iterdir()))
 EOF
 
 pip install 'isaaclab[isaacsim,all]==2.3.2' --extra-index-url https://pypi.nvidia.com --find-links /tmp/flatdict_whl/
-pip install trimesh pymavlink mavsdk
+pip install trimesh pymavlink 'mavsdk<4'
 ```
 
 ### Updated Conda IsaacLab Build
@@ -141,7 +141,7 @@ print("Done:", list(whl.iterdir()))
 EOF
 
 pip install 'isaaclab[isaacsim,all]==2.3.2' --extra-index-url https://pypi.nvidia.com --find-links /tmp/flatdict_whl/
-pip install trimesh pymavlink mavsdk
+pip install trimesh pymavlink 'mavsdk<4'
 
 # --- Final verification ---
 echo "=== conda envs ==="
@@ -256,7 +256,8 @@ git checkout sgoss/isaac-sim-import
 mkdir -p ~/go_aero/meshes
 cp meshes/* ~/go_aero/meshes/
 cp simulation/build_scene.py simulation/open_scene.py simulation/px4_visualizer.py \
-   simulation/fly_demo.py simulation/px4_bridge.py ~/go_aero/
+   simulation/fly_demo.py simulation/px4_bridge.py \
+   simulation/_compat.py simulation/_frames.py ~/go_aero/
 
 # Build the USD scene (headless, takes ~60s)
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -405,7 +406,7 @@ conda create -n env_isaaclab_jazzy python=3.11 -y
 conda activate env_isaaclab_jazzy
 pip install --force-reinstall setuptools wheel
 pip install isaacsim==5.1.0.0 isaaclab==2.3.2
-pip install trimesh pymavlink mavsdk
+pip install trimesh pymavlink 'mavsdk<4'
 ```
 
 Isaac Sim is ~15GB and takes several minutes to install via pip.

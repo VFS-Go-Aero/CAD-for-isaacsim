@@ -33,13 +33,13 @@ python build_scene.py --headless
 ```
 
 This creates `~/go_aero/vehicle_scene.usd` with the drone model,
-physics, and the `lidar_mount` Xform under the front-right prop arm.
+physics, and the `lidar_mount` Xform under the chassis.
 
 3. Verify the mount point exists:
 
 ```bash
 # In a Python shell with Isaac Sim loaded:
-stage.GetPrimAtPath('/World/Vehicle/prop_fr/lidar_mount')
+stage.GetPrimAtPath('/World/Vehicle/chassis/lidar_mount')
 # Should return a valid Xform prim
 ```
 
@@ -64,7 +64,7 @@ Expected output:
 [TUTORIAL] Opening vehicle_scene.usd...
 [TUTORIAL] Scene loaded.
 [TUTORIAL] Creating RTX LiDAR sensor...
-[TUTORIAL] LiDAR created at: /World/Vehicle/prop_fr/lidar_mount/lidar_sensor
+[TUTORIAL] LiDAR created at: /World/Vehicle/chassis/lidar_mount/lidar_sensor
 [TUTORIAL] Config: Example_Rotary
 [TUTORIAL] Setting up LiDAR data pipeline...
 [TUTORIAL] LiDAR data pipeline ready.
@@ -128,7 +128,7 @@ import omni.kit.commands
 result, lidar_prim = omni.kit.commands.execute(
     'IsaacSensorCreateRtxLidar',
     path='/lidar_sensor',
-    parent='/World/Vehicle/prop_fr/lidar_mount',
+    parent='/World/Vehicle/chassis/lidar_mount',
     config='Example_Rotary',
     translation=(0, 0, 0),
     orientation=Gf.Quatd(1, 0, 0, 0),
@@ -203,20 +203,17 @@ by modifying attributes on the sensor prim after creation.
 
 ### Exercise 1: Change the LiDAR position
 
-Mount the LiDAR under a different prop arm (e.g., `prop_fl`).
+Move the existing chassis mount. Keep the parent at `/World/Vehicle/chassis`. A mount under `prop_fl` (or any other propeller) spins with that propeller.
 
-1. In `build_scene.py`, add a new mount Xform:
+1. In `build_scene.py`, change the chassis mount translation:
    ```python
-   mount = UsdGeom.Xform.Define(stage, '/World/Vehicle/prop_fl/lidar_mount')
-   mount.AddTranslateOp().Set(Gf.Vec3d(0, -0.15, 0))
+   mount = UsdGeom.Xform.Define(stage, '/World/Vehicle/chassis/lidar_mount')
+   mount.AddTranslateOp().Set(Gf.Vec3d(-0.468, -0.04, -0.515))
    mount.AddRotateXOp().Set(180.0)
    ```
 2. Rebuild the scene: `python build_scene.py --headless`
-3. In the tutorial script, change the `parent` parameter:
-   ```python
-   parent='/World/Vehicle/prop_fl/lidar_mount',
-   ```
-4. Run and compare the point cloud — is it different?
+3. Leave the tutorial `parent` at `/World/Vehicle/chassis/lidar_mount`.
+4. Run and compare the point cloud.
 
 ### Exercise 2: Switch to Solid State LiDAR
 
@@ -282,10 +279,10 @@ build_scene.py                    px4_bridge.py / tutorial script
 Creates USD prims:                At runtime:
   /World/Vehicle/                   1. Loads vehicle_scene.usd
     chassis/                        2. Creates RTX LiDAR sensor
-      chassis_IMU  ←── IMU mount       on the mount prim
-    prop_fr/                        3. Attaches render product
-      lidar_mount  ←── LiDAR mount     + annotator
-    prop_fl/                        4. Physics loop:
+      chassis_IMU  ←── IMU mount       on the chassis mount prim
+      lidar_mount  ←── LiDAR mount  3. Attaches render product + annotator
+    prop_fr/                        4. Physics loop:
+    prop_fl/                           - Steps PhysX
     prop_rr/                           - Steps PhysX
     prop_rl/                           - Reads IMU, GPS, baro, mag
                                        - Reads LiDAR point cloud

@@ -49,8 +49,8 @@ USAGE:
 #   - Rotary: spinning LiDAR like a Velodyne VLP-16 (360-degree scan)
 #   - Solid State: fixed-pattern LiDAR like a Livox (limited FOV, no moving parts)
 #
-# In this tutorial we mount a Rotary LiDAR under the front-right propeller
-# arm, pointing downward toward the ground.
+# In this tutorial we mount a Rotary LiDAR on the chassis, under the
+# front-right arm, so the sensor does not spin with a propeller.
 
 # ============================================================
 # SECTION 2: Launch Isaac Sim and load the scene
@@ -128,7 +128,7 @@ except (ImportError, ModuleNotFoundError):
 # An RTX LiDAR sensor in Isaac Sim is created via a Kit command. The
 # command creates a Camera prim with special LiDAR attributes. We
 # parent it to the lidar_mount Xform that build_scene.py placed under
-# the front-right prop arm.
+# the chassis. The mount must not be a child of a propeller.
 #
 # Key parameters:
 #   path     — name of the sensor prim (created under parent)
@@ -154,13 +154,13 @@ for _ in range(10):
 result, lidar_prim = omni.kit.commands.execute(
     'IsaacSensorCreateRtxLidar',
     path='/lidar_sensor',
-    parent='/World/Vehicle/prop_fr/lidar_mount',
+    parent='/World/Vehicle/chassis/lidar_mount',
     config=args.lidar_config,
     translation=(0, 0, 0),            # no extra offset from mount
     orientation=Gf.Quatd(1, 0, 0, 0),  # identity quaternion (w,x,y,z)
 )
 
-lidar_prim_path = '/World/Vehicle/prop_fr/lidar_mount/lidar_sensor'
+lidar_prim_path = '/World/Vehicle/chassis/lidar_mount/lidar_sensor'
 print(f'[TUTORIAL] LiDAR created at: {lidar_prim_path}', flush=True)
 print(f'[TUTORIAL] Config: {args.lidar_config}', flush=True)
 
@@ -391,10 +391,8 @@ print('[TUTORIAL] Done.', flush=True)
 # Now that you understand how the LiDAR works, try these exercises:
 #
 # EXERCISE 1: Change the LiDAR position
-#   Modify the 'parent' parameter in IsaacSensorCreateRtxLidar to mount
-#   the LiDAR under a different prop arm (e.g., prop_fl, prop_rr, prop_rl).
-#   Note: you'll need to add a lidar_mount Xform under that arm first,
-#   similar to what build_scene.py does for prop_fr.
+#   In build_scene.py, change the chassis lidar_mount translate and
+#   rebuild the scene. Keep the parent at /World/Vehicle/chassis.
 #
 # EXERCISE 2: Switch to Solid State LiDAR
 #   Change --lidar-config to Example_Solid_State and observe how the

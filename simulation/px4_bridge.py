@@ -59,7 +59,7 @@ parser.add_argument('--render-hz', type=float, default=30.0,
 parser.add_argument('--no-noise', action='store_true',
                     help='Disable Gaussian sensor noise (useful for debugging)')
 parser.add_argument('--lidar', action='store_true',
-                    help='Attach a downward-facing RTX LiDAR under prop_fr')
+                    help='Attach a downward-facing RTX LiDAR under chassis')
 args = parser.parse_args()
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
@@ -345,7 +345,7 @@ if args.lidar:
     result, lidar_prim = omni.kit.commands.execute(
         'IsaacSensorCreateRtxLidar',
         path='/lidar_sensor',
-        parent='/World/Vehicle/prop_fr/lidar_mount',
+        parent='/World/Vehicle/chassis/lidar_mount',
         config='Example_Rotary',
         translation=(0, 0, 0),
         orientation=Gf.Quatd(1, 0, 0, 0),
@@ -367,7 +367,7 @@ if args.lidar:
     for _ in range(10):
         app.update()
 
-    print('[INFO] RTX LiDAR attached at /World/Vehicle/prop_fr/lidar_mount/lidar_sensor',
+    print('[INFO] RTX LiDAR attached at /World/Vehicle/chassis/lidar_mount/lidar_sensor',
           flush=True)
 
 print(f'[INFO] Waiting for PX4 on {args.protocol.upper()} {args.px4_port}...', flush=True)
