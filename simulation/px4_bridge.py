@@ -353,7 +353,7 @@ if args.lidar:
 
     # Hydra texture for the LiDAR render product
     hydra_texture = rep.create.render_product(
-        '/World/Vehicle/prop_fr/lidar_mount/lidar_sensor',
+        '/World/Vehicle/chassis/lidar_mount/lidar_sensor',
         resolution=(1, 1),
     )
 
