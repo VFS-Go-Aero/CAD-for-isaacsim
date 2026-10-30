@@ -493,10 +493,15 @@ Keep `~/ardupilot` outside this repo. Run SITL from a terminal with no conda env
 
 ### Run (three terminals)
 
+1. Windows laptop
+```bash
+ssh -i isaac-tunnel-key -o ServerAliveInterval=30 -L 14551:localhost:14551 ubuntu@34.230.236.198
+```
+
 1. ArduPilot SITL (no conda). Wait for the `STABILIZE>` prompt and the EKF-using-GPS message:
 ```bash
-   cd ~/ardupilot/ArduCopter
-   sim_vehicle.py -v ArduCopter -f quad --console -w --out=127.0.0.1:14561 --out=127.0.0.1:14540
+    cd ~/ardupilot/ArduCopter
+    sim_vehicle.py -v ArduCopter -f quad --console -w --out=127.0.0.1:14561 --out=127.0.0.1:14540 --out=tcpin:127.0.0.1:14551
 ```
 2. Visualizer. Wait for `Visualizer running!`:
 ```bash
