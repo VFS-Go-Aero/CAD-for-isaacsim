@@ -60,7 +60,15 @@ parser.add_argument('--no-noise', action='store_true',
                     help='Disable Gaussian sensor noise (useful for debugging)')
 parser.add_argument('--lidar', action='store_true',
                     help='Attach a downward-facing RTX LiDAR under chassis')
+# Isaac Lab 3 no longer registers --headless (it runs headless unless
+# --viz kit is passed) but still honors a 'headless' launcher arg.
+parser.add_argument('--headless', action='store_true',
+                    help='Run without a viewport')
+
+AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+if args.lidar:
+    args.enable_cameras = True  # RTX LiDAR needs rendering, even headless
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
@@ -203,34 +211,44 @@ for i in range(300):
 
 stage = omni.usd.get_context().get_stage()
 
-# Camera
-from omni.kit.viewport.utility.camera_state import ViewportCameraState
-cam = ViewportCameraState('/OmniverseKit_Persp')
-cam.set_position_world(Gf.Vec3d(8.0, -8.0, 5.0), True)
-cam.set_target_world(Gf.Vec3d(0.0, 0.0, 1.5), True)
+# Camera. omni.kit.viewport is only loaded when Kit has a display.
+try:
+    from omni.kit.viewport.utility.camera_state import ViewportCameraState
+    cam = ViewportCameraState('/OmniverseKit_Persp')
+    cam.set_position_world(Gf.Vec3d(8.0, -8.0, 5.0), True)
+    cam.set_target_world(Gf.Vec3d(0.0, 0.0, 1.5), True)
+except ModuleNotFoundError:
+    print('[INFO] No viewport; skipping camera', flush=True)
 
 # ============================================================
 # Physics handles
 # ============================================================
-# Rigid body wrapper — isaacsim.core.prims.SingleRigidPrim is the low-level
-# wrapper that exposes get_world_pose / get_linear_velocity /
+# Isaac Sim 6 replaced isaacsim.core.prims / isaacsim.sensors.physics with
+# the experimental extensions below. Isaac Lab's launcher does not enable
+# them, so they must be turned on before import.
+ext_manager = app.get_extension_manager()
+for ext in ('isaacsim.core.experimental.prims', 'isaacsim.sensors.experimental.physics'):
+    if not ext_manager.set_extension_enabled_immediate(ext, True):
+        raise RuntimeError(f'Could not enable extension {ext}')
+
+# Rigid body wrapper — exposes get_world_poses / get_velocities /
 # apply_forces_and_torques_at_pos against an already-authored USD rigid
 # body. We use it instead of an IsaacLab RigidObject because the scene is
 # pre-built (no spawn step) and this is a one-body system.
-from isaacsim.core.prims import SingleRigidPrim
-chassis = SingleRigidPrim('/World/Vehicle/chassis', name='chassis')
+from isaacsim.core.experimental.prims import RigidPrim
+chassis = RigidPrim('/World/Vehicle/chassis')
 
-# IMU sensor attached to chassis — reads body-frame lin_acc (with gravity)
-# and ang_vel at the physics step rate. Outputs are in the prim's local
-# frame, which is the mesh-body frame (Y-up); we convert to FRD at send.
-from isaacsim.sensors.physics import IMUSensor
-imu = IMUSensor(
-    prim_path='/World/Vehicle/chassis/chassis_IMU',
-    name='chassis_imu',
-    frequency=SENSOR_RATE,
-    translation=np.zeros(3),
-    orientation=np.array([1.0, 0.0, 0.0, 0.0]),  # (w,x,y,z) identity
-)
+# IMU sensor attached to chassis — reads body-frame linear acceleration
+# (with gravity) and angular velocity at the physics step rate. Outputs are
+# in the prim's local frame, which is the mesh-body frame (Y-up); we
+# convert to FRD at send. chassis_IMU is a plain Xform mount from
+# build_scene.py; the IsaacImuSensor prim is authored as its child.
+from isaacsim.sensors.experimental.physics import IMU, IMUSensor
+imu = IMUSensor(IMU(
+    '/World/Vehicle/chassis/chassis_IMU/imu_sensor',
+    translations=[[0.0, 0.0, 0.0]],
+    orientations=[[1.0, 0.0, 0.0, 0.0]],  # (w,x,y,z) identity
+))
 
 # Prop joint drives — visual spin only (decoupled from the force model).
 prop_drives = {}
@@ -316,56 +334,69 @@ print('[INFO] MAVLink receiver started', flush=True)
 timeline = omni.timeline.get_timeline_interface()
 timeline.play()
 
+# Under Isaac Lab 3's launcher, playing the timeline does not create the
+# PhysX tensor view RigidPrim needs; without it every read/write asserts.
+from isaacsim.core.simulation_manager import SimulationManager
+SimulationManager.initialize_physics()
+
 # Warm-up: let the physics scene and sensor initialize before we start
 # talking to PX4 — otherwise the first IMU frame reads as all-zeros and
 # PX4's EKF briefly sees impossible sensor data.
 for _ in range(30):
     app.update()
 
-# Initialize the physics wrappers now that the timeline is playing.
-chassis.initialize()
-imu.initialize()
-
 # ============================================================
 # Optional RTX LiDAR sensor (--lidar flag)
 # ============================================================
-lidar_annotator = None
+lidar_sensor = None
 LIDAR_READ_INTERVAL = 25  # read every 25 physics steps (~10 Hz at 250 Hz)
 
+
+def lidar_ranges():
+    """Return per-return ranges (m) from the latest LiDAR scan, or None."""
+    data, _ = lidar_sensor.get_data('generic-model-output')
+    if data is None:
+        return None
+    gmo = parse_generic_model_output_data(data)
+    if gmo.numElements == 0:
+        return None
+    if gmo.elementsCoordsType == generic_model_output.CoordsType.SPHERICAL:
+        return np.asarray(gmo.z, dtype=np.float64)  # x=azimuth, y=elevation, z=range
+    return np.linalg.norm(
+        np.stack([np.asarray(gmo.x), np.asarray(gmo.y), np.asarray(gmo.z)], axis=1), axis=1)
+
+
 if args.lidar:
-    import omni.kit.commands
-    import omni.replicator.core as rep
+    # Isaac Sim 6 replaced isaacsim.sensors.rtx (and its
+    # IsaacSensorCreateRtxLidar command) with the experimental extension.
+    if not ext_manager.set_extension_enabled_immediate('isaacsim.sensors.experimental.rtx', True):
+        raise RuntimeError('Could not enable extension isaacsim.sensors.experimental.rtx')
+    from isaacsim.sensors.experimental.rtx import (
+        Lidar, LidarSensor, generic_model_output, parse_generic_model_output_data,
+    )
 
-    # Enable the RTX sensor extension (not loaded by default in headless).
-    ext_manager = omni.kit.app.get_app().get_extension_manager()
-    ext_manager.set_extension_enabled_immediate('isaacsim.sensors.rtx', True)
-    for _ in range(10):
+    lidar_sensor = LidarSensor(
+        Lidar.create(
+            '/World/Vehicle/chassis/lidar_mount/lidar_sensor',
+            config='Example_Rotary',
+            translations=[[0.0, 0.0, 0.0]],
+            orientations=[[1.0, 0.0, 0.0, 0.0]],
+        ),
+        annotators=['generic-model-output'],
+    )
+
+    # Let the LiDAR render pipeline warm up until the first scan arrives.
+    first_ranges = None
+    for _ in range(300):
         app.update()
-
-    result, lidar_prim = omni.kit.commands.execute(
-        'IsaacSensorCreateRtxLidar',
-        path='/lidar_sensor',
-        parent='/World/Vehicle/chassis/lidar_mount',
-        config='Example_Rotary',
-        translation=(0, 0, 0),
-        orientation=Gf.Quatd(1, 0, 0, 0),
-    )
-
-    # Hydra texture for the LiDAR render product
-    hydra_texture = rep.create.render_product(
-        '/World/Vehicle/chassis/lidar_mount/lidar_sensor',
-        resolution=(1, 1),
-    )
-
-    # Annotator that delivers point cloud data on the CPU
-    lidar_annotator = rep.AnnotatorRegistry.get_annotator(
-        'IsaacCreateRTXLidarScanBuffer'
-    )
-    lidar_annotator.attach([hydra_texture])
-
-    # Let the LiDAR render pipeline warm up
-    for _ in range(10):
-        app.update()
+        first_ranges = lidar_ranges()
+        if first_ranges is not None:
+            break
+    if first_ranges is None:
+        print('[WARN] RTX LiDAR returned no points during warm-up', flush=True)
+    else:
+        print(f'[LIDAR] first scan: points={first_ranges.size}  '
+              f'min_dist={float(np.min(first_ranges)):.2f}m', flush=True)
 
     print('[INFO] RTX LiDAR attached at /World/Vehicle/chassis/lidar_mount/lidar_sensor',
           flush=True)
@@ -481,15 +512,17 @@ try:
         # --------------------------------------------------
         # Read physics state
         # --------------------------------------------------
-        pos_w, quat_w = chassis.get_world_pose()  # ENU world, quat (w,x,y,z)
-        pos_w = np.asarray(pos_w, dtype=np.float64)
-        quat_w = np.asarray(quat_w, dtype=np.float64)
-        lin_vel_w = np.asarray(chassis.get_linear_velocity(), dtype=np.float64)
+        # Wrapper returns one row per prim; ENU world, quat (w,x,y,z).
+        pos_w, quat_w = chassis.get_world_poses()
+        pos_w = pos_w.numpy()[0].astype(np.float64)
+        quat_w = quat_w.numpy()[0].astype(np.float64)
+        lin_vel_w, _ = chassis.get_velocities()
+        lin_vel_w = lin_vel_w.numpy()[0].astype(np.float64)
 
-        imu_frame = imu.get_current_frame()
-        # lin_acc includes gravity (specific force), already in body/mesh frame.
-        lin_acc_mesh = np.asarray(imu_frame['lin_acc'], dtype=np.float64)
-        ang_vel_mesh = np.asarray(imu_frame['ang_vel'], dtype=np.float64)
+        # read_gravity=True gives specific force, already in body/mesh frame.
+        imu_frame = imu.get_data(read_gravity=True)
+        lin_acc_mesh = np.asarray(imu_frame['linear_acceleration'], dtype=np.float64)
+        ang_vel_mesh = np.asarray(imu_frame['angular_velocity'], dtype=np.float64)
 
         # --------------------------------------------------
         # Derive PX4-frame sensors
@@ -556,26 +589,23 @@ try:
             forces=np.asarray([F_world], dtype=np.float32),
             torques=np.asarray([M_world], dtype=np.float32),
             positions=None,           # apply at COM -> pure force + moment
-            is_global=True,
+            local_frame=False,
         )
 
         # --------------------------------------------------
         # LiDAR point cloud read (optional)
         # --------------------------------------------------
-        if lidar_annotator is not None and step % LIDAR_READ_INTERVAL == 0:
+        if lidar_sensor is not None and step % LIDAR_READ_INTERVAL == 0:
             try:
-                buf = lidar_annotator.get_data()
-                if buf is not None and 'data' in buf:
-                    pts = np.array(buf['data']).reshape(-1, 3)
-                    if pts.shape[0] > 0:
-                        dists = np.linalg.norm(pts, axis=1)
-                        min_dist = float(np.min(dists))
-                        if step % (SENSOR_RATE * 2) == 0:
-                            print(
-                                f'[LIDAR] points={pts.shape[0]}  '
-                                f'min_dist={min_dist:.2f}m',
-                                flush=True,
-                            )
+                dists = lidar_ranges()
+                if dists is not None:
+                    min_dist = float(np.min(dists))
+                    if step % (SENSOR_RATE * 2) == 0:
+                        print(
+                            f'[LIDAR] points={dists.size}  '
+                            f'min_dist={min_dist:.2f}m',
+                            flush=True,
+                        )
             except Exception as e:
                 if step % (SENSOR_RATE * 2) == 0:
                     print(f'[LIDAR] read error: {e}', flush=True)
