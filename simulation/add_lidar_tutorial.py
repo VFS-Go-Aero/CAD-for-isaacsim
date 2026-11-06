@@ -44,10 +44,10 @@ USAGE:
 #   - Landing zone detection: find flat, clear areas to land safely
 #   - Mapping / SLAM: build 3D maps of the environment
 #
-# Isaac Sim provides an "RTX LiDAR" sensor that uses GPU ray-tracing to
-# simulate a real LiDAR. It supports two main configurations:
-#   - Rotary: spinning LiDAR like a Velodyne VLP-16 (360-degree scan)
-#   - Solid State: fixed-pattern LiDAR like a Livox (limited FOV, no moving parts)
+# Isaac Sim 6.2 provides an RTX LiDAR through isaacsim.sensors.experimental.rtx.
+# It uses GPU ray-tracing. Two presets used here:
+#   - Example_Rotary: spinning LiDAR like a Velodyne VLP-16 (360-degree scan)
+#   - Example_Solid_State: fixed-pattern LiDAR like a Livox (limited FOV)
 #
 # In this tutorial we mount a Rotary LiDAR on the chassis, under the
 # front-right arm, so the sensor does not spin with a propeller.
@@ -56,8 +56,9 @@ USAGE:
 # SECTION 2: Launch Isaac Sim and load the scene
 # ============================================================
 # Isaac Sim must be launched before importing most omni.* modules.
-# The AppLauncher handles this — it parses CLI args (like --headless)
-# and boots the Omniverse runtime.
+# The AppLauncher handles this. Isaac Lab 3 no longer registers --headless
+# (it runs headless unless --viz kit is passed) but still honors the flag
+# when this script registers it before add_app_launcher_args.
 
 import os
 os.environ['OMNI_KIT_ACCEPT_EULA'] = 'yes'
@@ -75,6 +76,10 @@ parser.add_argument('--duration', type=float, default=10.0,
 parser.add_argument('--lidar-config', type=str, default='Example_Rotary',
                     choices=['Example_Rotary', 'Example_Solid_State'],
                     help='LiDAR configuration preset (default: Example_Rotary)')
+# Must be registered before AppLauncher.add_app_launcher_args. Isaac Lab 3
+# dropped --headless from the launcher, but AppLauncher still reads the flag.
+parser.add_argument('--headless', action='store_true',
+                    help='Run without a viewport')
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 # RTX LiDAR requires the rendering pipeline, even in headless mode.
@@ -112,55 +117,54 @@ stage = omni.usd.get_context().get_stage()
 print('[TUTORIAL] Scene loaded.', flush=True)
 
 # Set up the camera so we can see the drone from a nice angle.
-# (Not available in --headless mode, so we guard the import.)
-try:
-    from omni.kit.viewport.utility.camera_state import ViewportCameraState
-    cam = ViewportCameraState('/OmniverseKit_Persp')
-    cam.set_position_world(Gf.Vec3d(4.0, -4.0, 3.0), True)
-    cam.set_target_world(Gf.Vec3d(0.0, 0.0, 1.5), True)
-except (ImportError, ModuleNotFoundError):
-    pass  # headless — no viewport
+# Isaac Lab 3 has no viewport unless --viz kit was passed.
+if not args.headless:
+    try:
+        from omni.kit.viewport.utility.camera_state import ViewportCameraState
+        cam = ViewportCameraState('/OmniverseKit_Persp')
+        cam.set_position_world(Gf.Vec3d(4.0, -4.0, 3.0), True)
+        cam.set_target_world(Gf.Vec3d(0.0, 0.0, 1.5), True)
+    except (ImportError, ModuleNotFoundError):
+        pass
 
 
 # ============================================================
 # SECTION 3: Create the LiDAR sensor prim
 # ============================================================
-# An RTX LiDAR sensor in Isaac Sim is created via a Kit command. The
-# command creates a Camera prim with special LiDAR attributes. We
-# parent it to the lidar_mount Xform that build_scene.py placed under
-# the chassis. The mount must not be a child of a propeller.
+# Isaac Sim 6.2 replaced isaacsim.sensors.rtx and the
+# IsaacSensorCreateRtxLidar Kit command with
+# isaacsim.sensors.experimental.rtx. Lidar.create authors an OmniLidar
+# prim from a named config. The parent is the lidar_mount Xform that
+# build_scene.py placed under the chassis, not under a propeller.
 #
 # Key parameters:
-#   path     — name of the sensor prim (created under parent)
-#   parent   — where in the USD hierarchy to attach it
-#   config   — which LiDAR profile to use (affects beam pattern, range, FOV)
+#   path          — full prim path of the sensor
+#   config        — which LiDAR profile to use (beam pattern, range, FOV)
+#   translations  — local offset from the mount, shape (1, 3)
+#   orientations  — local quaternion wxyz, shape (1, 4)
 #
 # The mount prim already has a RotateX(180) so the sensor's Z-axis
 # (default ray direction) points downward toward the ground.
 
 print('[TUTORIAL] Creating RTX LiDAR sensor...', flush=True)
 
-import omni.kit.commands
-
-# The RTX LiDAR command lives in the isaacsim.sensors.rtx extension.
-# IsaacLab's headless experience files don't load it by default, so we
-# enable it explicitly. The extension manager loads it asynchronously;
-# we tick a few frames to let it finish registering its commands.
 ext_manager = omni.kit.app.get_app().get_extension_manager()
-ext_manager.set_extension_enabled_immediate('isaacsim.sensors.rtx', True)
-for _ in range(10):
-    app.update()
-
-result, lidar_prim = omni.kit.commands.execute(
-    'IsaacSensorCreateRtxLidar',
-    path='/lidar_sensor',
-    parent='/World/Vehicle/chassis/lidar_mount',
-    config=args.lidar_config,
-    translation=(0, 0, 0),            # no extra offset from mount
-    orientation=Gf.Quatd(1, 0, 0, 0),  # identity quaternion (w,x,y,z)
+if not ext_manager.set_extension_enabled_immediate('isaacsim.sensors.experimental.rtx', True):
+    raise RuntimeError('Could not enable extension isaacsim.sensors.experimental.rtx')
+from isaacsim.sensors.experimental.rtx import (
+    Lidar, LidarSensor, generic_model_output, parse_generic_model_output_data,
 )
 
 lidar_prim_path = '/World/Vehicle/chassis/lidar_mount/lidar_sensor'
+lidar_sensor = LidarSensor(
+    Lidar.create(
+        lidar_prim_path,
+        config=args.lidar_config,
+        translations=[[0.0, 0.0, 0.0]],
+        orientations=[[1.0, 0.0, 0.0, 0.0]],
+    ),
+    annotators=['generic-model-output'],
+)
 print(f'[TUTORIAL] LiDAR created at: {lidar_prim_path}', flush=True)
 print(f'[TUTORIAL] Config: {args.lidar_config}', flush=True)
 
@@ -177,8 +181,9 @@ print(f'[TUTORIAL] Config: {args.lidar_config}', flush=True)
 #   - Rotation rate (Hz) for rotary sensors
 #   - Points per second
 #
-# You can override these by modifying attributes on the sensor prim.
-# For this tutorial, we use the defaults. See LIDAR_TUTORIAL.md for
+# You can override these with Lidar.create arguments such as tick_rate,
+# or by setting attributes on the OmniLidar prim after create.
+# For this tutorial, we use the preset defaults. See LIDAR_TUTORIAL.md for
 # a full table of configurable parameters.
 #
 # Common configurations:
@@ -187,36 +192,36 @@ print(f'[TUTORIAL] Config: {args.lidar_config}', flush=True)
 
 
 # ============================================================
-# SECTION 5: Attach annotator for point cloud data
+# SECTION 5: Read the generic model output
 # ============================================================
-# To actually *read* data from the LiDAR, we need two things:
+# LidarSensor was created with the 'generic-model-output' annotator.
+# That is the Isaac Sim 6.2 replacement for the replicator annotator
+# IsaacCreateRTXLidarScanBuffer. get_data returns a buffer that
+# parse_generic_model_output_data turns into azimuth, elevation, and
+# range (spherical) or xyz points (cartesian).
 #
-#   1. A "render product" — this tells the RTX renderer to actually
-#      compute the LiDAR rays each frame. Think of it as a camera
-#      feed, but for LiDAR.
-#
-#   2. An "annotator" — this is an Isaac Sim component that takes the
-#      raw render product and converts it into structured data (like
-#      a NumPy array of 3D points) that we can use in Python.
-#
-# The annotator we use is 'IsaacCreateRTXLidarScanBuffer'.
-# It gives us the full point cloud as an array of (x, y, z) points
-# in the sensor's local frame.
+# The render product is owned by LidarSensor. RTX still has to trace
+# the rays, which is why enable_cameras was set before launch and why
+# the warm-up below steps the app until the first scan arrives.
 
 print('[TUTORIAL] Setting up LiDAR data pipeline...', flush=True)
 
-import omni.replicator.core as rep
 
-# Create a render product for the LiDAR sensor.
-# The resolution parameter is required but doesn't control the LiDAR's
-# own resolution — that comes from the config file.
-hydra_texture = rep.create.render_product(lidar_prim_path, resolution=(1, 1))
+def lidar_ranges():
+    """Return per-return ranges (m) from the latest scan, or None."""
+    data, _ = lidar_sensor.get_data('generic-model-output')
+    if data is None:
+        return None
+    gmo = parse_generic_model_output_data(data)
+    if gmo.numElements == 0:
+        return None
+    if gmo.elementsCoordsType == generic_model_output.CoordsType.SPHERICAL:
+        return np.asarray(gmo.z, dtype=np.float64)  # x=azimuth, y=elevation, z=range
+    return np.linalg.norm(
+        np.stack([np.asarray(gmo.x), np.asarray(gmo.y), np.asarray(gmo.z)], axis=1),
+        axis=1,
+    )
 
-# Create and attach the point cloud annotator.
-lidar_annotator = rep.AnnotatorRegistry.get_annotator(
-    'IsaacCreateRTXLidarScanBuffer'
-)
-lidar_annotator.attach([hydra_texture])
 
 print('[TUTORIAL] LiDAR data pipeline ready.', flush=True)
 
@@ -248,14 +253,29 @@ KI = 2.0    # integral gain
 
 vehicle_path = '/World/Vehicle'
 
-# Start the physics timeline
+# Start the physics timeline. Under Isaac Lab 3, playing the timeline
+# does not create the PhysX tensor view, so initialize it explicitly.
+# This tutorial still steps with app.update(), the same pattern as
+# px4_bridge.py before a caller applies its own motor wrench.
 print('[TUTORIAL] Starting simulation...', flush=True)
 timeline = omni.timeline.get_timeline_interface()
 timeline.play()
+from isaacsim.core.simulation_manager import SimulationManager
+SimulationManager.initialize_physics()
 
-# Warm up: let physics settle and the LiDAR render pipeline initialize.
-for _ in range(60):
+# Warm up until the first LiDAR scan arrives. The render pipeline needs
+# several frames before generic-model-output has points.
+first_ranges = None
+for _ in range(300):
     app.update()
+    first_ranges = lidar_ranges()
+    if first_ranges is not None:
+        break
+if first_ranges is None:
+    print('[WARN] RTX LiDAR returned no points during warm-up', flush=True)
+else:
+    print(f'[LIDAR] first scan: points={first_ranges.size}  '
+          f'min_dist={float(np.min(first_ranges)):.2f}m', flush=True)
 
 print(f'[TUTORIAL] Hover altitude: {args.hover}m', flush=True)
 print(f'[TUTORIAL] Duration: {args.duration}s', flush=True)
@@ -308,37 +328,29 @@ try:
         # ---- Read LiDAR point cloud ----
         if step % LIDAR_READ_INTERVAL == 0:
             try:
-                buf = lidar_annotator.get_data()
-                if buf is not None and 'data' in buf:
-                    pts = np.array(buf['data']).reshape(-1, 3)
-                    num_points = pts.shape[0]
+                distances = lidar_ranges()
+                if distances is not None and distances.size > 0:
+                    num_points = int(distances.size)
+                    min_dist = float(np.min(distances))
+                    mean_dist = float(np.mean(distances))
+                    max_dist = float(np.max(distances))
 
-                    if num_points > 0:
-                        # Compute distance from sensor to each point.
-                        # Points are in the sensor's local frame, so the
-                        # distance is simply the Euclidean norm.
-                        distances = np.linalg.norm(pts, axis=1)
-                        min_dist = float(np.min(distances))
-                        mean_dist = float(np.mean(distances))
-                        max_dist = float(np.max(distances))
+                    lidar_read_count += 1
+                    total_points += num_points
+                    min_distance_ever = min(min_distance_ever, min_dist)
 
-                        lidar_read_count += 1
-                        total_points += num_points
-                        min_distance_ever = min(min_distance_ever, min_dist)
-
-                        # Print LiDAR data periodically
-                        if step % STATUS_INTERVAL == 0:
-                            print(
-                                f'[LIDAR] step={step:5d}  '
-                                f'points={num_points:5d}  '
-                                f'min={min_dist:.2f}m  '
-                                f'mean={mean_dist:.2f}m  '
-                                f'max={max_dist:.2f}m',
-                                flush=True,
-                            )
-                    elif step % STATUS_INTERVAL == 0:
-                        print(f'[LIDAR] step={step:5d}  points=0 (no returns)',
-                              flush=True)
+                    if step % STATUS_INTERVAL == 0:
+                        print(
+                            f'[LIDAR] step={step:5d}  '
+                            f'points={num_points:5d}  '
+                            f'min={min_dist:.2f}m  '
+                            f'mean={mean_dist:.2f}m  '
+                            f'max={max_dist:.2f}m',
+                            flush=True,
+                        )
+                elif step % STATUS_INTERVAL == 0:
+                    print(f'[LIDAR] step={step:5d}  points=0 (no returns)',
+                          flush=True)
             except Exception as e:
                 if step % STATUS_INTERVAL == 0:
                     print(f'[LIDAR] read error: {e}', flush=True)
@@ -403,17 +415,14 @@ print('[TUTORIAL] Done.', flush=True)
 #   Create a second mount point on the chassis (not rotated 180 degrees)
 #   so the LiDAR faces forward. You'll need:
 #     a) A new Xform under /World/Vehicle/chassis with appropriate rotation
-#     b) A second IsaacSensorCreateRtxLidar command
-#     c) A second render product + annotator
+#     b) A second Lidar.create / LidarSensor at that path
+#     c) A second generic-model-output read
 #   This is useful for obstacle detection during forward flight.
 #
 # EXERCISE 4: Publish as ROS2 PointCloud2
-#   Isaac Sim can publish sensor data to ROS2 topics. Replace the
-#   annotator with a ROS2 publish action:
-#     writer = rep.writers.get('RtxLidarROS2PublishPointCloud')
-#     writer.initialize(topicName='/lidar/points', frameId='lidar_sensor')
-#     writer.attach([hydra_texture])
-#   Then view the data in RViz2 or with `ros2 topic echo`.
+#   px4_bridge.py can enable the ROS 2 bridge separately. A second sensor
+#   is another LidarSensor with annotators=['generic-model-output']; a ROS
+#   publisher would consume lidar_ranges() rather than a replicator writer.
 #
 # EXERCISE 5: Terrain-following hover
 #   Use the LiDAR min_distance reading to replace the PID controller's
