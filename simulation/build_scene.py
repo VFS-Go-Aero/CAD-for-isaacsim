@@ -17,6 +17,10 @@ os.environ['OMNI_KIT_ACCEPT_EULA'] = 'yes'
 from isaaclab.app import AppLauncher
 import argparse
 parser = argparse.ArgumentParser()
+# Isaac Lab 3 no longer registers --headless (headless unless --viz kit)
+# but still honors a 'headless' launcher arg. Register it before
+# AppLauncher so `python build_scene.py --headless` is accepted.
+parser.add_argument('--headless', action='store_true', help='Run without a viewport')
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app_launcher = AppLauncher(args)
@@ -68,12 +72,15 @@ physics_scene = UsdPhysics.Scene.Define(stage, '/World/PhysicsScene')
 physics_scene.CreateGravityDirectionAttr(Gf.Vec3f(0, 0, -1))
 physics_scene.CreateGravityMagnitudeAttr(9.81)
 
-cfg = sim_utils.GroundPlaneCfg()
-cfg.func('/World/GroundPlane', cfg)
-light_cfg = sim_utils.DistantLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0)
-light_cfg.func('/World/Light', light_cfg)
-dome_cfg = sim_utils.DomeLightCfg(color=(0.13, 0.13, 0.13), intensity=1000.0)
-dome_cfg.func('/World/SkyLight', dome_cfg)
+# Isaac Lab 3 reads the stage from a thread-local context. The Kit stage
+# is not visible to GroundPlaneCfg / light spawners until it is bound.
+with sim_utils.use_stage(stage):
+    cfg = sim_utils.GroundPlaneCfg()
+    cfg.func('/World/GroundPlane', cfg)
+    light_cfg = sim_utils.DistantLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0)
+    light_cfg.func('/World/Light', light_cfg)
+    dome_cfg = sim_utils.DomeLightCfg(color=(0.13, 0.13, 0.13), intensity=1000.0)
+    dome_cfg.func('/World/SkyLight', dome_cfg)
 
 # ============================================================
 # Uneven terrain mesh for LiDAR testing

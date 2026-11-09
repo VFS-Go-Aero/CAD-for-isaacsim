@@ -223,7 +223,7 @@ except ModuleNotFoundError:
 # ============================================================
 # Physics handles
 # ============================================================
-# Isaac Sim 6 replaced isaacsim.core.prims / isaacsim.sensors.physics with
+# Isaac Sim 6.2 replaced isaacsim.core.prims / isaacsim.sensors.physics with
 # the experimental extensions below. Isaac Lab's launcher does not enable
 # them, so they must be turned on before import.
 ext_manager = app.get_extension_manager()
@@ -367,7 +367,7 @@ def lidar_ranges():
 
 
 if args.lidar:
-    # Isaac Sim 6 replaced isaacsim.sensors.rtx (and its
+    # Isaac Sim 6.2 replaced isaacsim.sensors.rtx (and its
     # IsaacSensorCreateRtxLidar command) with the experimental extension.
     if not ext_manager.set_extension_enabled_immediate('isaacsim.sensors.experimental.rtx', True):
         raise RuntimeError('Could not enable extension isaacsim.sensors.experimental.rtx')

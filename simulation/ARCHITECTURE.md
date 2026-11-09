@@ -2,6 +2,10 @@
 
 How the Go Aero simulation hangs together — processes, data flow, coordinate frames, and threading.
 
+## Stack
+
+Isaac Sim 6.2 (`isaacsim==6.2.0.0`) and Isaac Lab 3 (`isaaclab==3.0.0`) on Python 3.12, conda env `env_isaaclab_3`. Launcher scripts register `--headless` because Isaac Lab 3 runs headless unless `--viz kit` is passed. Rigid body and IMU reads go through `isaacsim.core.experimental.prims.RigidPrim` and `isaacsim.sensors.experimental.physics`, after `SimulationManager.initialize_physics()`. RTX LiDAR is `isaacsim.sensors.experimental.rtx.Lidar.create` with the `generic-model-output` annotator.
+
 ## Two Simulation Modes
 
 ### Mode 1 — PX4 SIH + Isaac Sim Visualizer  *(default, working)*
@@ -43,6 +47,24 @@ PX4's `simulator_mavlink` module is the one that opens the connection — it's t
 
 **Properties:** Real airframe parameters (mass, inertia tensor, motor placement, prop characteristics) drive dynamics. Required for tuning the autopilot against the actual Go Aero airframe.
 
+### ArduCopter visualizer — SITL physics, Isaac Sim mirrors pose
+
+Same Isaac process as Mode 1. ArduCopter flies its built-in quadrotor. `sim_vehicle.py` sends MAVLink to UDP 14550 (the visualizer) and UDP 14540 (`ardu_poshold.py`). The visualizer disables the USD rigid bodies and does not play the timeline, so PhysX cannot drop the model through the ground plane. It requests `LOCAL_POSITION_NED`, `ATTITUDE`, and `SERVO_OUTPUT_RAW` with `SET_MESSAGE_INTERVAL` because ArduCopter ignores the legacy `REQUEST_DATA_STREAM` call.
+
+### ArduCopter PhysX bridge — `ardupilot_bridge.py`
+
+Isaac Sim is the aircraft. ArduCopter SITL is started with `-f JSON` and exchanges one servo packet for one JSON state reply on UDP 9002. The bridge does not step PhysX until that packet arrives, then it replies once. Thrust is linear in the normalized command: 0.5 equals vehicle weight (`MOT_THST_HOVER`), and 1.0 is twice weight. ArduPilot has already applied `MOT_THST_EXPO`. Mission Planner connects to SITL TCP 5760.
+
+```
+ ┌──────────────────────┐                                      ┌──────────────────────┐
+ │  ardupilot_bridge.py │   servo PWM (one packet)             │  ArduCopter SITL     │
+ │  (Isaac Sim PhysX)   │◄─────────────────────────────────────┤  (-f JSON)           │
+ │   ──────────────     │   JSON state (one reply)             │   ──────────────     │
+ │   - one PhysX step   ├─────────────────────────────────────►│   - EKF              │
+ │   - IMU + pose       │              UDP 9002                │   - controller       │
+ └──────────────────────┘                                      └──────────────────────┘
+```
+
 ---
 
 ## Process Topology
@@ -50,14 +72,19 @@ PX4's `simulator_mavlink` module is the one that opens the connection — it's t
 | Process | Conda env? | GPU? | Network |
 |---|---|---|---|
 | `bin/px4 -d` (PX4 SITL) | No | No | binds UDP 14550 (MAVLink GCS), 14540 (MAVSDK offboard); HIL mode additionally dials out to the bridge on TCP 4560 |
-| `python px4_visualizer.py` | **yes** (`env_isaaclab_jazzy`) | **yes** (`--device cuda`) | binds UDP 14550 input |
-| `python fly_demo.py` | **yes** (`env_isaaclab_jazzy`) | No | binds UDP 14540 input |
-| `python px4_bridge.py` | **yes** (`env_isaaclab_jazzy`) | **yes** | binds TCP 4560 (bidirectional; PX4 connects in) |
+| `python px4_visualizer.py` | **yes** (`env_isaaclab_3`) | **yes** (`--device cuda`) | binds UDP 14550 input |
+| `python fly_demo.py` | **yes** (`env_isaaclab_3`) | No | binds UDP 14540 input |
+| `python px4_bridge.py` | **yes** (`env_isaaclab_3`) | **yes** | binds TCP 4560 (bidirectional; PX4 connects in) |
+| `python ardupilot_bridge.py` | **yes** (`env_isaaclab_3`) | **yes** | binds UDP 9002; one JSON reply per servo packet |
+| `python ardu_poshold.py` | **yes** (`env_isaaclab_3`) | No | binds UDP 14540 |
+| `sim_vehicle.py` (ArduCopter) | No | No | MAVProxy sends UDP 14550 and 14540; JSON physics uses UDP 9002; TCP 5760 for Mission Planner |
 | `python joystick_control.py` *(Phase 2, local Windows machine)* | No | No | sends UDP to EC2:14550 |
 
 For the **Visualizer** path: PX4 must start first so its MAVLink output is already publishing to 14550 when the visualizer binds. MAVSDK clients (`fly_demo.py`) can start any time after PX4.
 
 For the **HIL Bridge** path: start order is **bridge first, PX4 second**. PX4's `simulator_mavlink` module connects out to the bridge's listening socket; if the bridge isn't up yet, PX4 prints `Waiting for simulator to connect…` and halts sensor wiring until it sees us.
+
+For the **ArduCopter visualizer**: start SITL first so MAVLink is publishing, then the visualizer, then `ardu_poshold.py`. For the **ArduCopter JSON bridge**: start `ardupilot_bridge.py` first so UDP 9002 is bound, then `sim_vehicle.py -f JSON`.
 
 ---
 
@@ -109,18 +136,18 @@ Pure-USD scene assembly. Run once per scene structure change.
 
 Output: `~/go_aero/vehicle_scene.usd`. The visualizer reads this read-only.
 
-### `open_scene.py`  *(standalone, no PX4 — for testing the scene + physics)*
+### `open_scene.py`  *(standalone, no autopilot — for testing the scene + physics)*
 
-Opens the scene and runs a **PID altitude controller** on the prop joint drives. PX4 is not involved. Useful for:
+Opens the scene and runs a **PID altitude controller** as an upward world-frame force on the chassis. Prop joint drives only spin the meshes. Useful for:
 - Verifying the scene loads
-- Tuning the prop velocity → thrust scaling
+- Checking that the chassis can hold altitude under PhysX
 - Testing PhysX behavior in isolation
 
-PID gains are constants in the file (`KP=15`, `KD=8`, `KI=2`).
+PID gains are constants in the file (`KP=15`, `KD=8`, `KI=2`). `add_lidar_tutorial.py` uses the same force.
 
-### `px4_visualizer.py`  *(default mode)*
+### `px4_visualizer.py`  *(PX4 SIH or ArduCopter SITL)*
 
-The main visualizer. Two threads:
+The visualizer disables rigid bodies on the chassis and propellers, removes the articulation root, and stops the timeline. PhysX does not integrate the vehicle. Two threads:
 
 | Thread | Loop | Owns |
 |---|---|---|
@@ -132,7 +159,7 @@ The main visualizer. Two threads:
 2. Set `xformOp:translate` on `/World/Vehicle` to ENU position
 3. For each prop, integrate `prop_angles[name] += motors[i] * 30.0 * spin_dir` and set `xformOp:rotateY`
 
-**Important:** The visualizer requests a 50 Hz data stream from PX4 with `request_data_stream_send(MAV_DATA_STREAM_ALL, 50, 1)` after the first heartbeat — without this you'll only get heartbeats and won't see the drone move.
+**Important:** After the first heartbeat the visualizer sends both `request_data_stream_send(MAV_DATA_STREAM_ALL, 50, 1)` and `SET_MESSAGE_INTERVAL` for `LOCAL_POSITION_NED`, `ATTITUDE`, and `SERVO_OUTPUT_RAW`. PX4 honors the legacy request. ArduCopter uses the interval command. Without a position stream the model stays at the seed pose.
 
 ### `fly_demo.py`  *(MAVSDK mission script)*
 
@@ -157,8 +184,8 @@ The full HIL bridge. Two threads, same shape as the visualizer, but the data flo
 - `HEARTBEAT` → updates `armed` from `MAV_MODE_FLAG_SAFETY_ARMED`
 
 **Main / physics loop** — one `app.update()` per PhysX tick at `SENSOR_RATE` (250 Hz):
-1. `chassis.get_world_pose()` and `chassis.get_linear_velocity()` — ENU world pose and velocity
-2. `imu.get_current_frame()` — mesh-body-frame `lin_acc` (with gravity) and `ang_vel`
+1. `chassis.get_world_poses()` and `chassis.get_velocities()` — ENU world pose and velocity, one row per prim
+2. `imu.get_data(read_gravity=True)` — mesh-body-frame `linear_acceleration` (with gravity) and `angular_velocity`
 3. Build the sensor packet:
    - Accelerometer + gyro: convert mesh-body → FRD via `mesh_body_to_frd()`
    - Magnetometer: rotate the NED world field `B_WORLD_NED` into the mesh-body frame via the chassis quaternion's conjugate, then FRD-convert
@@ -180,9 +207,11 @@ Frame conversions are centralised in `_frames.py` (shared with the visualizer).
 
 | Port | Direction | Protocol | Used by |
 |---|---|---|---|
-| 14540 | PX4 → MAVSDK clients | UDP | `fly_demo.py` listens, PX4 publishes |
-| 14550 | PX4 ↔ ground stations | UDP | `px4_visualizer.py` listens, PX4 publishes; `joystick_control.py` sends `MANUAL_CONTROL` in |
+| 14540 | autopilot → companion | UDP | `fly_demo.py` and `ardu_poshold.py` listen; PX4 and MAVProxy publish |
+| 14550 | autopilot → visualizer / GCS | UDP | `px4_visualizer.py` listens; PX4 and MAVProxy publish; `joystick_control.py` sends `MANUAL_CONTROL` in |
 | 4560 | bidirectional | TCP (default) or UDP | `px4_bridge.py` binds and listens, PX4's `simulator_mavlink` dials out to it (HIL mode only). TCP is PX4's default transport; use `--protocol udp` if you patch `px4-rc.mavlinksim` |
+| 9002 | bidirectional, one frame at a time | UDP | `ardupilot_bridge.py` binds; ArduCopter `-f JSON` sends one servo packet and waits for one JSON reply |
+| 5760 | SITL → Mission Planner | TCP | `sim_vehicle.py` default console |
 | 8443 | DCV remote desktop | TCP/TLS | NICE DCV viewer ↔ EC2 |
 | 22 | SSH | TCP | terminal access |
 
@@ -200,7 +229,7 @@ Viewport rendering is decoupled from physics: `--render-hz` (default 30) throttl
 
 If you see jittery motion, check:
 1. Visualizer: the data stream rate is actually being sent (`request_data_stream_send` succeeded)
-2. The conda env didn't get the wrong pymavlink (only the one in `env_isaaclab_jazzy` should be active)
+2. The conda env didn't get the wrong pymavlink (only the one in `env_isaaclab_3` should be active)
 3. Isaac Sim's actual frame rate via the `[INFO] t=…` status line (bridge) or `step % 300 == 0` (visualizer)
 4. HIL only: PX4 is not *also* trying to drive its own simulator — `SYS_HITL=1` and `SENS_EN_{GPSSIM,BAROSIM,MAGSIM}=0` in the airframe file must be set
 

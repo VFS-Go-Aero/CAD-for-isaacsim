@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-PX4 SIH Visualizer — reads vehicle state from PX4 via MAVLink and
-updates the Go Aero model position/orientation in Isaac Sim.
+MAVLink pose visualizer. Reads LOCAL_POSITION_NED, ATTITUDE, and
+SERVO_OUTPUT_RAW and moves the Go Aero model in Isaac Sim.
 
-PX4 SIH handles all physics internally. We just mirror the pose.
+The autopilot owns the flight dynamics (PX4 SIH, or ArduCopter's built-in
+SITL model). This process only mirrors that pose. Rigid bodies in the USD
+are disabled so PhysX cannot drop the vehicle through the ground plane.
 
-Usage:
-  1. Start PX4 SIH (already running if you followed setup)
+Usage with ArduCopter (acceptance Mode 1):
+  1. sim_vehicle.py -v ArduCopter, with MAVLink outs on UDP 14550 and 14540
+  2. python px4_visualizer.py --device cuda --mavlink-port 14550
+  3. python ardu_poshold.py --port 14540
+
+Usage with PX4 SIH:
+  1. Start PX4 SIH
   2. python px4_visualizer.py --device cuda
-  3. In another terminal: connect to PX4 and command takeoff:
-       cd ~/PX4-Autopilot/build/px4_sitl_default
-       bin/px4 -s "commander arm; commander takeoff"
-     Or use QGroundControl / MAVSDK
+  3. fly_demo.py, QGroundControl, or MAVSDK on UDP 14540
 """
 import os
 import time
@@ -25,6 +29,11 @@ from isaaclab.app import AppLauncher
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--mavlink-port', type=int, default=14550, help='PX4 MAVLink UDP port')
+parser.add_argument('--load-only', action='store_true',
+                    help='Load the scene and exit. Skips the MAVLink connection.')
+# Isaac Lab 3 no longer registers --headless (headless unless --viz kit)
+# but still honors a 'headless' launcher arg. Register it before AppLauncher.
+parser.add_argument('--headless', action='store_true', help='Run without a viewport')
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app_launcher = AppLauncher(args)
@@ -52,11 +61,23 @@ for i in range(300):
 
 stage = omni.usd.get_context().get_stage()
 
-# Camera
-from omni.kit.viewport.utility.camera_state import ViewportCameraState
-cam = ViewportCameraState("/OmniverseKit_Persp")
-cam.set_position_world(Gf.Vec3d(12.0, -12.0, 8.0), True)
-cam.set_target_world(Gf.Vec3d(0.0, 0.0, 3.0), True)
+if args.load_only:
+    vehicle = stage.GetPrimAtPath('/World/Vehicle')
+    lidar = stage.GetPrimAtPath('/World/Vehicle/chassis/lidar_mount')
+    if not vehicle.IsValid() or not lidar.IsValid():
+        print('[CHECK] scene load failed: vehicle or lidar_mount prim missing', flush=True)
+        simulation_app.close()
+        raise SystemExit(1)
+    print('[CHECK] scene loaded', flush=True)
+    simulation_app.close()
+    raise SystemExit(0)
+
+# Camera. omni.kit.viewport is only loaded when Kit has a display.
+if not getattr(args, 'headless', False):
+    from omni.kit.viewport.utility.camera_state import ViewportCameraState
+    cam = ViewportCameraState("/OmniverseKit_Persp")
+    cam.set_position_world(Gf.Vec3d(12.0, -12.0, 8.0), True)
+    cam.set_target_world(Gf.Vec3d(0.0, 0.0, 3.0), True)
 
 # Get vehicle prim for updating pose
 vehicle_prim = stage.GetPrimAtPath('/World/Vehicle')
@@ -89,6 +110,32 @@ for name in ['prop_fr', 'prop_fl', 'prop_rr', 'prop_rl']:
     prim = stage.GetPrimAtPath(f'/World/Vehicle/{name}')
     if prim:
         prop_prims[name] = prim
+
+
+def _freeze_physics(stage):
+    """Stop PhysX from integrating the vehicle. MAVLink owns the pose."""
+    vehicle = stage.GetPrimAtPath('/World/Vehicle')
+    if vehicle.IsValid() and vehicle.HasAPI(UsdPhysics.ArticulationRootAPI):
+        vehicle.RemoveAPI(UsdPhysics.ArticulationRootAPI)
+    for path in (
+        '/World/Vehicle/chassis',
+        '/World/Vehicle/prop_fr',
+        '/World/Vehicle/prop_fl',
+        '/World/Vehicle/prop_rr',
+        '/World/Vehicle/prop_rl',
+    ):
+        prim = stage.GetPrimAtPath(path)
+        if not prim.IsValid() or not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            continue
+        body = UsdPhysics.RigidBodyAPI(prim)
+        body.CreateRigidBodyEnabledAttr(False)
+        body.CreateKinematicEnabledAttr(True)
+
+
+_freeze_physics(stage)
+timeline = omni.timeline.get_timeline_interface()
+timeline.stop()
+print('[INFO] Physics frozen. Visualizer mirrors MAVLink pose only.', flush=True)
 
 # ============================================================
 # MAVLink connection
@@ -158,29 +205,28 @@ print('[INFO] Waiting for PX4 heartbeat...')
 mav.wait_heartbeat(timeout=30)
 print(f'[INFO] PX4 connected! System {mav.target_system}, component {mav.target_component}')
 
-# Request data streams
+# PX4 still honors the legacy stream request. ArduCopter ignores it and
+# uses SET_MESSAGE_INTERVAL, so send both.
 mav.mav.request_data_stream_send(
     mav.target_system, mav.target_component,
     mavutil.mavlink.MAV_DATA_STREAM_ALL, 50, 1  # 50 Hz all streams
 )
-
-# ============================================================
-# Start sim (no physics needed - we just update poses)
-# ============================================================
-print('[INFO] Starting visualization...')
-timeline = omni.timeline.get_timeline_interface()
-timeline.play()
-
-for _ in range(60):
-    app.update()
+for msg_id, hz in (
+    (mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED, 50),
+    (mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE, 50),
+    (mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW, 20),
+):
+    mav.mav.command_long_send(
+        mav.target_system, mav.target_component,
+        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+        0,
+        float(msg_id), float(1_000_000 // hz),
+        0, 0, 0, 0, 0,
+    )
 
 print('[INFO] Visualizer running!')
-print('[INFO] To fly:')
-print('[INFO]   Terminal into PX4: ~/PX4-Autopilot/build/px4_sitl_default/bin/px4-shell')
-print('[INFO]   Or use mavlink shell: mavlink_shell.py')
-print('[INFO]   commander arm')
-print('[INFO]   commander takeoff')
-print('[INFO]   commander land', flush=True)
+print('[INFO] ArduCopter: python ardu_poshold.py --port 14540')
+print('[INFO] PX4: commander arm / takeoff / land, or python fly_demo.py', flush=True)
 
 # Prop spin state
 prop_angles = {'prop_fr': 0.0, 'prop_fl': 0.0, 'prop_rr': 0.0, 'prop_rl': 0.0}
@@ -243,6 +289,5 @@ try:
 except KeyboardInterrupt:
     print('[INFO] Stopping...')
 
-timeline.stop()
 simulation_app.close()
 print('[INFO] Done.')

@@ -203,24 +203,62 @@ print(f'[TUTORIAL] Config: {args.lidar_config}', flush=True)
 # The render product is owned by LidarSensor. RTX still has to trace
 # the rays, which is why enable_cameras was set before launch and why
 # the warm-up below steps the app until the first scan arrives.
+#
+# The old IsaacCreateRTXLidarScanBuffer annotator kept the last cloud.
+# generic-model-output is empty on most steps, and missed beams are
+# range 0. Slice to numElements and drop those misses so a minimum is
+# a real return, the same quantity the old point list produced.
 
 print('[TUTORIAL] Setting up LiDAR data pipeline...', flush=True)
 
 
+def _prim_float(prim, name, default):
+    attr = prim.GetAttribute(name)
+    if not attr.IsValid():
+        return default
+    value = attr.Get()
+    return float(value) if value else default
+
+
+_lidar_prim = stage.GetPrimAtPath(lidar_prim_path)
+LIDAR_NEAR_M = max(0.0, _prim_float(_lidar_prim, 'omni:sensor:Core:nearRangeM', 0.0))
+LIDAR_FAR_M = _prim_float(_lidar_prim, 'omni:sensor:Core:farRangeM', 100.0)
+if LIDAR_FAR_M <= LIDAR_NEAR_M:
+    LIDAR_FAR_M = 100.0
+
+
 def lidar_ranges():
-    """Return per-return ranges (m) from the latest scan, or None."""
+    """Return valid ranges (m) from the latest scan, or None if it is empty."""
     data, _ = lidar_sensor.get_data('generic-model-output')
     if data is None:
         return None
     gmo = parse_generic_model_output_data(data)
-    if gmo.numElements == 0:
+    count = int(gmo.numElements)
+    if count <= 0:
         return None
     if gmo.elementsCoordsType == generic_model_output.CoordsType.SPHERICAL:
-        return np.asarray(gmo.z, dtype=np.float64)  # x=azimuth, y=elevation, z=range
-    return np.linalg.norm(
-        np.stack([np.asarray(gmo.x), np.asarray(gmo.y), np.asarray(gmo.z)], axis=1),
-        axis=1,
-    )
+        ranges = np.asarray(gmo.z, dtype=np.float64)[:count]
+    else:
+        ranges = np.linalg.norm(
+            np.stack(
+                [
+                    np.asarray(gmo.x, dtype=np.float64)[:count],
+                    np.asarray(gmo.y, dtype=np.float64)[:count],
+                    np.asarray(gmo.z, dtype=np.float64)[:count],
+                ],
+                axis=1,
+            ),
+            axis=1,
+        )
+    ranges = ranges[
+        np.isfinite(ranges)
+        & (ranges > 0.0)
+        & (ranges >= LIDAR_NEAR_M)
+        & (ranges <= LIDAR_FAR_M)
+    ]
+    if ranges.size == 0:
+        return None
+    return ranges
 
 
 print('[TUTORIAL] LiDAR data pipeline ready.', flush=True)
@@ -287,10 +325,12 @@ prev_z = args.hover
 integral_error = 0.0
 step = 0
 
-# State for LiDAR statistics
+# State for LiDAR statistics. last_ranges is the previous non-empty
+# scan, which is what the old scan-buffer annotator kept between ticks.
 lidar_read_count = 0
 total_points = 0
 min_distance_ever = float('inf')
+last_ranges = first_ranges
 
 SIM_RATE = 250  # approximate physics rate (Hz)
 LIDAR_READ_INTERVAL = 25  # read LiDAR every 25 steps (~10 Hz)
@@ -330,27 +370,29 @@ try:
             try:
                 distances = lidar_ranges()
                 if distances is not None and distances.size > 0:
+                    last_ranges = distances
                     num_points = int(distances.size)
                     min_dist = float(np.min(distances))
-                    mean_dist = float(np.mean(distances))
-                    max_dist = float(np.max(distances))
-
                     lidar_read_count += 1
                     total_points += num_points
                     min_distance_ever = min(min_distance_ever, min_dist)
 
-                    if step % STATUS_INTERVAL == 0:
+                # Print the latest cloud, including one that arrived
+                # between status steps. An empty tick is not a new scan.
+                reported = distances if distances is not None and distances.size > 0 else last_ranges
+                if step % STATUS_INTERVAL == 0:
+                    if reported is not None and reported.size > 0:
                         print(
                             f'[LIDAR] step={step:5d}  '
-                            f'points={num_points:5d}  '
-                            f'min={min_dist:.2f}m  '
-                            f'mean={mean_dist:.2f}m  '
-                            f'max={max_dist:.2f}m',
+                            f'points={int(reported.size):5d}  '
+                            f'min={float(np.min(reported)):.2f}m  '
+                            f'mean={float(np.mean(reported)):.2f}m  '
+                            f'max={float(np.max(reported)):.2f}m',
                             flush=True,
                         )
-                elif step % STATUS_INTERVAL == 0:
-                    print(f'[LIDAR] step={step:5d}  points=0 (no returns)',
-                          flush=True)
+                    else:
+                        print(f'[LIDAR] step={step:5d}  points=0 (no returns)',
+                              flush=True)
             except Exception as e:
                 if step % STATUS_INTERVAL == 0:
                     print(f'[LIDAR] read error: {e}', flush=True)

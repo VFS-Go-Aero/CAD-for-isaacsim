@@ -69,22 +69,25 @@ Expected output:
 [TUTORIAL] Setting up LiDAR data pipeline...
 [TUTORIAL] LiDAR data pipeline ready.
 [TUTORIAL] Starting simulation...
+[LIDAR] first scan: points=166713  min_dist=1.00m
 [TUTORIAL] Hover altitude: 2.0m
-[TUTORIAL] Duration: 10.0s
+[TUTORIAL] Duration: 5.0s
 [TUTORIAL] Running...
 
-[LIDAR] step=  250  points= 4812  min=1.48m  mean=1.95m  max=3.41m
-[HOVER] step=  250  altitude=1.98m  target=2.0m
+[LIDAR] step=  250  points=166713  min=1.00m  mean=2.87m  max=50.99m
+[HOVER] step=  250  altitude=1.50m  target=2.0m
 ...
 ============================================================
   LiDAR Tutorial — Summary
 ============================================================
-  Total physics steps:    2500
-  LiDAR reads:            100
-  Total points collected:  481200
-  Closest point ever:     1.47m
+  Total physics steps:    1250
+  LiDAR reads:            4
+  Total points collected:  666061
+  Closest point ever:     1.00m
 ============================================================
 ```
+
+The hover block is the previous one: a PID on the `/World/Vehicle` transform spins the four propeller joints. That transform stays at its authored height, so the altitude line stays at 1.50 m. `Example_Rotary` on Isaac Sim 6.2 returns about 166,000 valid points per scan. The old sample of about 4,800 points was the previous scan-buffer annotator. A status line repeats the latest non-empty scan, and ranges of 0 are dropped as missed beams.
 
 ## Using LiDAR with the PX4 bridge
 
@@ -123,61 +126,62 @@ are fully composed.
 ### Section 3 — Create the LiDAR sensor prim
 
 ```python
-import omni.kit.commands
+from isaacsim.sensors.experimental.rtx import (
+    Lidar, LidarSensor, generic_model_output, parse_generic_model_output_data,
+)
 
-result, lidar_prim = omni.kit.commands.execute(
-    'IsaacSensorCreateRtxLidar',
-    path='/lidar_sensor',
-    parent='/World/Vehicle/chassis/lidar_mount',
-    config='Example_Rotary',
-    translation=(0, 0, 0),
-    orientation=Gf.Quatd(1, 0, 0, 0),
+lidar_prim_path = '/World/Vehicle/chassis/lidar_mount/lidar_sensor'
+lidar_sensor = LidarSensor(
+    Lidar.create(
+        lidar_prim_path,
+        config='Example_Rotary',
+        translations=[[0.0, 0.0, 0.0]],
+        orientations=[[1.0, 0.0, 0.0, 0.0]],
+    ),
+    annotators=['generic-model-output'],
 )
 ```
 
-The `IsaacSensorCreateRtxLidar` command creates a Camera-type prim with
-special LiDAR attributes. It is parented to the mount Xform, which
-already has a `RotateX(180)` so the sensor faces downward.
+Isaac Sim 6.2 authors an OmniLidar prim through `Lidar.create`. The
+parent is the chassis mount Xform, which already has a `RotateX(180)`
+so the sensor faces downward. The script enables
+`isaacsim.sensors.experimental.rtx` and sets `enable_cameras` before
+launch so the rays are traced even when `--headless` is set.
 
 ### Section 4 — Configure the sensor
 
-The `config` parameter selects a preset that defines range, FOV,
+The `config` argument selects a preset that defines range, FOV,
 resolution, and scan pattern. See the **Sensor parameters** table below.
+Override the preset with `Lidar.create` arguments such as `tick_rate`,
+or by setting attributes on the OmniLidar prim after create.
 
-### Section 5 — Attach annotator for point cloud data
+### Section 5 — Read the generic model output
 
-```python
-import omni.replicator.core as rep
-
-hydra_texture = rep.create.render_product(lidar_prim_path, resolution=(1, 1))
-
-lidar_annotator = rep.AnnotatorRegistry.get_annotator(
-    'IsaacCreateRTXLidarScanBuffer'
-)
-lidar_annotator.attach([hydra_texture])
-```
-
-Two components are needed to read LiDAR data:
-
-1. **Render product** — tells the RTX renderer to compute LiDAR rays
-   each frame.
-2. **Annotator** — converts raw render output into a structured NumPy
-   array of `(x, y, z)` points in the sensor's local frame.
+`annotators=['generic-model-output']` is how Isaac Sim 6.2 reads an RTX
+LiDAR scan. `LidarSensor` owns the render product. `get_data` returns a
+buffer that `parse_generic_model_output_data` turns into azimuth,
+elevation, and range. Most physics steps return `numElements == 0`
+because the sensor publishes once per tick. The previous
+`IsaacCreateRTXLidarScanBuffer` annotator kept the last cloud, so the
+tutorial does the same: a status line repeats the latest non-empty scan.
+Arrays are sliced to `numElements`, and ranges outside the prim's near
+and far limits are dropped. A range of 0 is a missed beam.
 
 ### Section 6 — Run simulation and read data
 
-The main loop combines a PID hover controller (same as `open_scene.py`)
-with periodic LiDAR reads:
+The main loop is the previous PID hover. It reads the `/World/Vehicle`
+transform, computes thrust with the same gains, and sets the four
+propeller joint speeds to `(thrust / 4) * 500`. LiDAR is read every 25
+steps.
 
 ```python
-buf = lidar_annotator.get_data()
-pts = np.array(buf['data']).reshape(-1, 3)
-distances = np.linalg.norm(pts, axis=1)
-min_dist = float(np.min(distances))
+distances = lidar_ranges()  # valid ranges in meters, or None on an empty tick
+if distances is not None:
+    min_dist = float(np.min(distances))
 ```
 
-Points are in the sensor's local coordinate frame. The Euclidean norm
-of each point gives the distance from the sensor to that surface.
+Spherical returns store range in `z`. `lidar_ranges` already removed
+misses, so the minimum is the distance to the nearest real surface.
 
 ### Section 7 — Exercises (comments only)
 
@@ -236,19 +240,17 @@ Create a second LiDAR for obstacle detection:
    fwd_mount.AddTranslateOp().Set(Gf.Vec3d(0, 0, -0.3))  # front of chassis
    fwd_mount.AddRotateXOp().Set(90.0)  # tilt forward
    ```
-2. Create a second sensor, render product, and annotator.
-3. Read both point clouds and compare: one shows the ground, the other
-   shows obstacles ahead.
+2. Create a second `Lidar.create` / `LidarSensor` at that path, again with
+   `annotators=['generic-model-output']`.
+3. Read both scans and compare: one shows the ground, the other shows
+   obstacles ahead.
 
 ### Exercise 4: Publish LiDAR data as ROS2 PointCloud2
 
-Replace the CPU annotator with a ROS2 publisher:
-
-```python
-writer = rep.writers.get('RtxLidarROS2PublishPointCloud')
-writer.initialize(topicName='/lidar/points', frameId='lidar_sensor')
-writer.attach([hydra_texture])
-```
+Publish ranges from `lidar_ranges()` on a ROS 2 topic. The experimental
+LiDAR path does not use the replicator `RtxLidarROS2PublishPointCloud`
+writer. `px4_bridge.py` enables `isaacsim.ros2.bridge` separately when
+you need `/clock` and `/tf`.
 
 Then visualize in RViz2:
 ```bash
@@ -280,7 +282,7 @@ Creates USD prims:                At runtime:
   /World/Vehicle/                   1. Loads vehicle_scene.usd
     chassis/                        2. Creates RTX LiDAR sensor
       chassis_IMU  ←── IMU mount       on the chassis mount prim
-      lidar_mount  ←── LiDAR mount  3. Attaches render product + annotator
+      lidar_mount  ←── LiDAR mount  3. Reads generic-model-output ranges
     prop_fr/                        4. Physics loop:
     prop_fl/                           - Steps PhysX
     prop_rr/                           - Steps PhysX

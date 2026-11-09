@@ -2,16 +2,15 @@
 """
 ArduPilot SITL (SIM_JSON) <-> Isaac Sim PhysX Bridge (Hardware/Software-In-The-Loop).
 
-Isaac Sim owns the physics (Mode 2). Each simulation step:
-  1. Drains incoming binary servo PWM packets from ArduPilot SITL (`-f JSON`)
-     over UDP (default port 9002).
-  2. Maps ArduCopter Quad-X (`FRAME_CLASS=1, FRAME_TYPE=1`) motor channels onto
-     the Go Aero `PROP_LAYOUT` and applies per-motor thrust forces and reaction
-     yaw torques to `/World/Vehicle/chassis`.
-  3. Steps PhysX by `SIM_DT = 1.0 / SENSOR_RATE` and reads IMU + chassis pose/velocity.
-  4. Converts state from Isaac Sim ENU / mesh-body (Y-up) into NED / FRD and sends
-     one lockstep newline-delimited JSON sensor state packet expected by ArduPilot's
-     `SIM_JSON` (`libraries/SITL/SIM_JSON.cpp`).
+Isaac Sim owns the physics (Mode 2). Lockstep, one ArduPilot frame at a time:
+  1. Wait for one binary servo PWM packet from ArduPilot SITL (`-f JSON`)
+     over UDP (default port 9002). PhysX does not advance while waiting.
+  2. Map ArduCopter Quad-X (`FRAME_CLASS=1, FRAME_TYPE=1`) motor channels onto
+     the Go Aero `PROP_LAYOUT` and apply per-motor thrust forces and reaction
+     yaw torques to `/World/Vehicle/chassis`. Command 0.5 produces vehicle weight.
+  3. Step PhysX once (`SIM_DT = 1.0 / SENSOR_RATE`) and read IMU + chassis pose/velocity.
+  4. Convert state from Isaac Sim ENU / mesh-body (Y-up) into NED / FRD and send
+     exactly one JSON state reply for that packet (`libraries/SITL/SIM_JSON.cpp`).
 
 Motor mapping (`ARDU_PROP_ORDER` vs `PX4_PROP_ORDER`):
   ArduCopter Quad-X (`FRAME_CLASS=1, FRAME_TYPE=1`):
@@ -129,7 +128,10 @@ HOME_ALT = 10.0  # m above MSL
 # Vehicle physical parameters (must match build_scene.py)
 DRONE_MASS = 5.0        # kg
 GRAVITY = 9.81          # m/s^2
-MAX_THRUST_PER_MOTOR = 2.0 * DRONE_MASS * GRAVITY / 4.0  # ~24.5 N per motor (2g total)
+# Linear in the normalized servo command. ArduPilot already applies MOT_THST_EXPO
+# before the PWM, and MOT_THST_HOVER is 0.5, so command 0.5 must equal weight.
+# Command 1.0 is 2x weight (~24.5 N per motor).
+MAX_THRUST_PER_MOTOR = 2.0 * DRONE_MASS * GRAVITY / 4.0
 K_TAU = 0.016           # m — reaction yaw torque coefficient per unit thrust
 
 # Sensor noise standard deviations (disabled with --no-noise)
@@ -362,7 +364,7 @@ def compute_motor_forces_and_torques(
     for i, name in enumerate(prop_order):
         raw_c = float(cmds[i])
         c = max(0.0, min(1.0, raw_c)) if math.isfinite(raw_c) else 0.0
-        T_i = MAX_THRUST_PER_MOTOR * (c ** 2)
+        T_i = MAX_THRUST_PER_MOTOR * c
         r_body = PROP_LAYOUT[name]['pos_body']
         F_i = (0.0, T_i, 0.0)  # mesh +Y = body up
         fx += F_i[0]
@@ -499,7 +501,7 @@ def main() -> None:
     # --------------------------------------------------------
     # Physics Handles
     # --------------------------------------------------------
-    # Isaac Sim 6 replaced isaacsim.core.prims / isaacsim.sensors.physics
+    # Isaac Sim 6.2 replaced isaacsim.core.prims / isaacsim.sensors.physics
     # with these experimental extensions. Isaac Lab's launcher does not
     # enable them.
     ext_manager = app.get_extension_manager()
@@ -561,7 +563,6 @@ def main() -> None:
     # Optional RTX LiDAR sensor (--lidar flag)
     # --------------------------------------------------------
     lidar_sensor = None
-    lidar_hydra_texture = None
     LIDAR_READ_INTERVAL = 25  # ~10 Hz at 250 Hz physics
 
     def lidar_ranges():
@@ -710,6 +711,24 @@ def main() -> None:
                 ('PublishStaticTF.inputs:staticPublisher', True),
             ]
 
+            lidar_ros = False
+            if args.lidar and lidar_sensor is not None:
+                try:
+                    lidar_rp = str(lidar_sensor.render_product.GetPrim().GetPath())
+                except Exception as e:
+                    lidar_rp = None
+                    print(f'[WARN] LiDAR render product unavailable for ROS 2: {e}', flush=True)
+                if lidar_rp:
+                    lidar_ros = True
+                    create_nodes.append(('PublishLidar', 'isaacsim.ros2.bridge.ROS2RtxLidarHelper'))
+                    connect_edges.append(('OnPlaybackTick.outputs:tick', 'PublishLidar.inputs:execIn'))
+                    set_values.extend([
+                        ('PublishLidar.inputs:renderProductPath', lidar_rp),
+                        ('PublishLidar.inputs:topicName', '/lidar/points'),
+                        ('PublishLidar.inputs:frameId', 'lidar_sensor'),
+                        ('PublishLidar.inputs:type', 'point_cloud'),
+                    ])
+
             if args.zed and zed_render_products:
                 zed_topics = [
                     ('zed1', '/zed1/zed_node/point_cloud/cloud_registered', ZED1_OPTICAL_FRAME_ID),
@@ -775,17 +794,10 @@ def main() -> None:
                     '/zed2/zed_node/point_cloud/cloud_registered',
                     flush=True,
                 )
+            if lidar_ros:
+                print('[INFO] ROS 2 publishing RTX LiDAR point cloud on /lidar/points', flush=True)
         except Exception as e:
             print(f'[WARN] ROS 2 OmniGraph setup warning: {e}', flush=True)
-
-        if args.lidar and lidar_hydra_texture is not None:
-            try:
-                lidar_ros2_writer = rep.writers.get('RtxLidarROS2PublishPointCloud')
-                lidar_ros2_writer.initialize(topicName='/lidar/points', frameId='lidar_sensor')
-                lidar_ros2_writer.attach([lidar_hydra_texture])
-                print('[INFO] ROS 2 publishing RTX LiDAR point cloud on /lidar/points', flush=True)
-            except Exception as e:
-                print(f'[WARN] Could not attach RtxLidarROS2PublishPointCloud: {e}', flush=True)
 
     # --------------------------------------------------------
     # UDP Socket for ArduPilot SITL SIM_JSON (port 9002)
@@ -852,55 +864,39 @@ def main() -> None:
     sim_time = 0.0
     _render_period_steps = max(1, int(round(SENSOR_RATE / max(args.render_hz, 1.0))))
 
+    def recv_one_packet(timeout: float) -> ServoPacket | None:
+        """Return one servo packet, or None on timeout. Does not step PhysX."""
+        nonlocal peer_addr, ardu_connected
+        sock.settimeout(timeout)
+        try:
+            data, addr = sock.recvfrom(1024)
+        except (socket.timeout, BlockingIOError, InterruptedError, OSError):
+            return None
+        try:
+            pkt = parse_ardupilot_servo_packet(data)
+        except ValueError as exc:
+            print(f'[WARN] Ignoring malformed packet from {addr}: {exc}', flush=True)
+            return None
+        peer_addr = addr
+        ardu_connected = True
+        return pkt
+
     try:
         while simulation_app.is_running():
             # --------------------------------------------------
-            # 1. Drain all currently waiting UDP packets (non-blocking)
+            # 1. One servo packet per physics step. While SITL is in
+            #    lockstep, do not integrate until that packet arrives.
             # --------------------------------------------------
             latest_pkt: ServoPacket | None = pending_pkt
             pending_pkt = None
 
-            sock.setblocking(False)
-            while True:
-                try:
-                    data, addr = sock.recvfrom(1024)
-                except (BlockingIOError, InterruptedError):
+            if latest_pkt is None and (ardu_connected or not args.no_wait):
+                while latest_pkt is None and simulation_app.is_running():
+                    latest_pkt = recv_one_packet(0.5)
+                if latest_pkt is None:
                     break
-                except OSError:
-                    break
-                try:
-                    latest_pkt = parse_ardupilot_servo_packet(data)
-                    peer_addr = addr
-                    ardu_connected = True
-                except ValueError as exc:
-                    print(f'[WARN] Ignoring malformed packet from {addr}: {exc}', flush=True)
-
-            # If no packet arrived yet and ArduPilot is connected, wait up to a
-            # short lockstep timeout (20 ms) for ArduPilot's next servo packet.
-            if latest_pkt is None and ardu_connected:
-                sock.settimeout(0.020)
-                try:
-                    data, addr = sock.recvfrom(1024)
-                    try:
-                        latest_pkt = parse_ardupilot_servo_packet(data)
-                        peer_addr = addr
-                    except ValueError as exc:
-                        print(f'[WARN] Ignoring malformed packet from {addr}: {exc}', flush=True)
-                except (socket.timeout, BlockingIOError, OSError):
-                    pass
-
-                # Drain any additional packets that arrived right behind it
-                sock.setblocking(False)
-                while True:
-                    try:
-                        data, addr = sock.recvfrom(1024)
-                    except (BlockingIOError, InterruptedError, OSError):
-                        break
-                    try:
-                        latest_pkt = parse_ardupilot_servo_packet(data)
-                        peer_addr = addr
-                    except ValueError:
-                        pass
+            elif latest_pkt is None:
+                latest_pkt = recv_one_packet(0.0)
 
             if latest_pkt is not None:
                 for i in range(4):

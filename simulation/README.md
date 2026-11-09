@@ -1,6 +1,6 @@
 # Go Aero Isaac Sim Simulation
 
-This folder contains the Python scripts that drive the Go Aero eVTOL simulation in NVIDIA Isaac Sim, with a PX4 SITL autopilot in the loop.
+This folder contains the Python scripts that drive the Go Aero eVTOL simulation in NVIDIA Isaac Sim, with PX4 or ArduCopter SITL in the loop.
 
 For installation and one-time setup, see the [root README](../README.md).
 For internals, see [ARCHITECTURE.md](./ARCHITECTURE.md) and [PX4_API.md](./PX4_API.md).
@@ -34,7 +34,11 @@ CAD-for-isaacsim/
 │   ├── build_scene.py         build vehicle_scene.usd from STL meshes
 │   ├── open_scene.py          open scene with PID hover controller (no PX4)
 │   ├── px4_visualizer.py      mirror PX4 SIH pose into Isaac Sim   (default mode)
-│   ├── px4_bridge.py          full HIL bridge (sensors out, motors in)
+│   ├── px4_bridge.py          PX4 HIL bridge (sensors out, motors in)
+│   ├── ardupilot_bridge.py    ArduCopter JSON lockstep bridge
+│   ├── ardu_poshold.py        ArduCopter takeoff, POSHOLD, land
+│   ├── add_lidar_tutorial.py  RTX LiDAR tutorial with altitude hold
+│   ├── params/go_aero_ardupilot.param
 │   ├── joystick_control.py    (Phase 2) Xbox controller → MANUAL_CONTROL to PX4
 │   └── fly_demo.py            MAVSDK script: takeoff, fly square, land
 ├── meshes/                    STL files: frame.stl, FR.stl, FL.stl, BR.stl, BL.stl
@@ -47,8 +51,9 @@ CAD-for-isaacsim/
 
 ```
 /home/ubuntu/
-├── miniconda3/                                   conda + env_isaaclab_jazzy env
+├── miniconda3/                                   conda + env_isaaclab_3 env
 ├── PX4-Autopilot/                                PX4 source + built SITL binary
+├── ardupilot/                                    ArduCopter SITL
 └── go_aero/                                      runtime working dir
     ├── meshes/                                   copy of repo meshes
     ├── vehicle_scene.usd                         built by build_scene.py
@@ -56,7 +61,11 @@ CAD-for-isaacsim/
     ├── open_scene.py
     ├── px4_visualizer.py
     ├── px4_bridge.py
-    └── fly_demo.py
+    ├── ardupilot_bridge.py
+    ├── ardu_poshold.py
+    ├── add_lidar_tutorial.py
+    ├── fly_demo.py
+    └── params/go_aero_ardupilot.param
 ```
 
 The scripts read the scene from `~/go_aero/vehicle_scene.usd` (a hard-coded path inside each script — see the *Updating* section if you need to change this).
@@ -69,7 +78,7 @@ Three terminals (or `tmux` panes). Activate the conda env in each first:
 
 ```bash
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate env_isaaclab_jazzy
+conda activate env_isaaclab_3
 ```
 
 ### Visualizer mode (PX4 SIH physics)
@@ -90,6 +99,32 @@ conda activate env_isaaclab_jazzy
 
 The bridge requires the `chassis_IMU` prim to exist in the USD — rebuild the scene first (`python ~/go_aero/build_scene.py --headless`) if you're upgrading from an earlier checkout.
 
+### ArduCopter visualizer (SITL physics, Isaac Sim mirrors pose)
+
+`px4_visualizer.py` disables rigid bodies, so PhysX does not pull the model through the ground. ArduCopter's own quadrotor model flies the vehicle.
+
+| Terminal | Command | Wait for |
+|---|---|---|
+| 1 — ArduCopter | `cd ~/ardupilot && Tools/autotest/sim_vehicle.py -v ArduCopter --no-rebuild --add-param-file=$HOME/go_aero/params/go_aero_ardupilot.param --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14540` | `Ready to FLY` |
+| 2 — Isaac Sim | `python ~/go_aero/px4_visualizer.py --device cuda --mavlink-port 14550` | `Visualizer running!` |
+| 3 — Mission | `python ~/go_aero/ardu_poshold.py --altitude 5 --hold 30` | takeoff → POSHOLD → land |
+
+### ArduCopter PhysX bridge (JSON lockstep)
+
+Start the bridge first. It steps PhysX once per servo packet on UDP 9002 and sends one JSON state reply. Command 0.5 produces vehicle weight. Mission Planner uses SITL TCP 5760.
+
+| Terminal | Command | Wait for |
+|---|---|---|
+| 1 — Bridge | `python ~/go_aero/ardupilot_bridge.py --device cuda --port 9002` | `Waiting for ArduPilot SITL` |
+| 2 — ArduCopter | `cd ~/ardupilot && Tools/autotest/sim_vehicle.py -v ArduCopter -f JSON --no-rebuild --add-param-file=$HOME/go_aero/params/go_aero_ardupilot.param --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14540` | bridge prints `Bridge running.` |
+| 3 — Mission | Mission Planner on TCP 5760, or `python ~/go_aero/ardu_poshold.py --port 14540` | hover, no EKF failsafe |
+
+### LiDAR tutorial
+
+```bash
+python ~/go_aero/add_lidar_tutorial.py --headless --hover 2.0 --duration 10
+```
+
 Connect a viewer with NICE DCV at `https://52.91.203.66:8443` to see the Isaac Sim viewport.
 
 ---
@@ -108,7 +143,7 @@ nano px4_visualizer.py         # or vim/code-server
 # When happy, copy back into the repo clone
 cd ~/go_aero_repo               # the cloned CAD-for-isaacsim
 git checkout sgoss/isaac-sim-import
-cp ~/go_aero/{build_scene,open_scene,px4_visualizer,px4_bridge,fly_demo,_frames}.py simulation/
+cp ~/go_aero/{build_scene,open_scene,px4_visualizer,px4_bridge,ardupilot_bridge,ardu_poshold,add_lidar_tutorial,fly_demo,_frames}.py simulation/
 
 # Commit and push
 git add simulation/
@@ -144,7 +179,7 @@ cp simulation/*.py ~/go_aero/
 You must rebuild the USD scene before the visualizer can see the change:
 
 ```bash
-conda activate env_isaaclab_jazzy
+conda activate env_isaaclab_3
 python ~/go_aero/build_scene.py --headless     # ~60 s
 ```
 
@@ -169,8 +204,11 @@ Then restart the PX4 terminal.
 |---|---|---|---|
 | `build_scene.py` | `~/go_aero/meshes/*.stl` | `~/go_aero/vehicle_scene.usd` | — |
 | `open_scene.py` | `~/go_aero/vehicle_scene.usd` | viewport | — (standalone, no PX4) |
-| `px4_visualizer.py` | USD scene + MAVLink UDP `:14550` | viewport | PX4 SIH |
-| `px4_bridge.py` | USD scene + MAVLink UDP `:4560` (bidirectional) | HIL_SENSOR / HIL_GPS out, HIL_ACTUATOR_CONTROLS in | PX4 SITL (HIL mode) |
+| `px4_visualizer.py` | USD scene + MAVLink UDP `:14550` | viewport (physics off) | PX4 SIH or ArduCopter SITL |
+| `px4_bridge.py` | USD scene + MAVLink TCP `:4560` (bidirectional) | HIL_SENSOR / HIL_GPS out, HIL_ACTUATOR_CONTROLS in | PX4 SITL (HIL mode) |
+| `ardupilot_bridge.py` | USD scene + one SIM_JSON servo packet on UDP `:9002` | one JSON state reply per packet | ArduCopter `-f JSON` |
+| `ardu_poshold.py` | MAVLink UDP `:14540` | takeoff, POSHOLD, land | ArduCopter |
+| `add_lidar_tutorial.py` | USD scene | RTX LiDAR ranges, upward hover force | — |
 | `fly_demo.py` | — | MAVSDK UDP `:14540` | PX4 (offboard) |
 | `joystick_control.py` | Xbox controller (USB) | MAVLink `MANUAL_CONTROL` over UDP `:14550` | PX4 GCS endpoint |
 

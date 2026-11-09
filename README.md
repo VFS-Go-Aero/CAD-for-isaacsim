@@ -27,129 +27,26 @@ conda init bash
 source ~/.bashrc
 ```
 
-### 2. Conda Environment with Isaac Sim
+### 2. Conda Environment with Isaac Sim 6.2 and Isaac Lab 3
+
+Isaac Lab 3.0 requires Python 3.12. The `isaacsim` extra pins `isaacsim[all,extscache]==6.2.0.0`. Accept the conda terms of service before creating the env, or the create step fails and later pip installs land on the system Python.
 
 ```bash
-# Accept conda terms of service (required before creating envs)
 source ~/miniconda3/etc/profile.d/conda.sh
 conda config --set auto_activate_base false
-conda init bash
-source ~/.bashrc
-
-conda create -n env_isaaclab_jazzy python=3.11 -y
-conda activate env_isaaclab_jazzy
-pip install --upgrade pip setuptools
-pip install 'isaacsim[all,extscache]==5.1.0' --extra-index-url https://pypi.nvidia.com
-
-# flatdict==4.0.1 (required by isaaclab) has a broken setup.py that calls pkg_resources,
-# which is absent in pip's isolated build envs on modern setuptools. This script patches
-# it and pre-builds a wheel that pip will use instead of rebuilding from source.
-python - << 'EOF'
-import subprocess, sys, tarfile, textwrap, urllib.request
-from pathlib import Path
-
-src  = Path("/tmp/flatdict_src")
-whl  = Path("/tmp/flatdict_whl")
-src.mkdir(exist_ok=True)
-whl.mkdir(exist_ok=True)
-
-url = "https://files.pythonhosted.org/packages/source/f/flatdict/flatdict-4.0.1.tar.gz"
-tgz = src / "flatdict-4.0.1.tar.gz"
-print("Downloading flatdict source...")
-urllib.request.urlretrieve(url, tgz)
-
-with tarfile.open(tgz) as t:
-    t.extractall(src)
-
-(src / "flatdict-4.0.1" / "setup.py").write_text(
-    "import setuptools\nsetuptools.setup()\n"
-)
-
-print("Building patched wheel...")
-subprocess.check_call([sys.executable, "-m", "pip", "wheel",
-    str(src / "flatdict-4.0.1"), "--no-deps", "-w", str(whl)])
-print("Done:", list(whl.iterdir()))
-EOF
-
-pip install 'isaaclab[isaacsim,all]==2.3.2' --extra-index-url https://pypi.nvidia.com --find-links /tmp/flatdict_whl/
-pip install trimesh pymavlink 'mavsdk<4'
-```
-
-### Updated Conda IsaacLab Build
-```bash
-#!/bin/bash
-set -e  # stop immediately if any command fails, instead of silently continuing
-
-# --- Conda setup ---
-source ~/miniconda3/etc/profile.d/conda.sh
-conda config --set auto_activate_base false
-
-# Accept conda terms of service (this was missing before, which is why
-# env_isaaclab_jazzy never actually got created and every pip install
-# below ran against the system Python instead)
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
 
-conda init bash
-source ~/.bashrc
-
-# Remove any partial/broken env from a previous failed attempt
-conda env remove -n env_isaaclab_jazzy -y || true
-
-conda create -n env_isaaclab_jazzy python=3.11 -y
-conda activate env_isaaclab_jazzy
-
-# Sanity check: make sure activation actually worked before installing anything
-if [[ "$(which python)" != *"env_isaaclab_jazzy"* ]]; then
-    echo "ERROR: conda environment did not activate correctly. Aborting."
-    echo "python resolved to: $(which python)"
-    exit 1
-fi
-echo "Using python: $(which python)"
-
+conda create -n env_isaaclab_3 python=3.12 -y
+conda activate env_isaaclab_3
 pip install --upgrade pip setuptools
-pip install 'isaacsim[all,extscache]==5.1.0' --extra-index-url https://pypi.nvidia.com
-
-# flatdict==4.0.1 (required by isaaclab) has a broken setup.py that calls pkg_resources,
-# which is absent in pip's isolated build envs on modern setuptools. This patches it
-# and pre-builds a wheel that pip will use instead of rebuilding from source.
-python - << 'EOF'
-import subprocess, sys, tarfile, urllib.request
-from pathlib import Path
-
-src = Path("/tmp/flatdict_src")
-whl = Path("/tmp/flatdict_whl")
-src.mkdir(exist_ok=True)
-whl.mkdir(exist_ok=True)
-
-url = "https://files.pythonhosted.org/packages/source/f/flatdict/flatdict-4.0.1.tar.gz"
-tgz = src / "flatdict-4.0.1.tar.gz"
-print("Downloading flatdict source...")
-urllib.request.urlretrieve(url, tgz)
-
-with tarfile.open(tgz) as t:
-    t.extractall(src)
-
-(src / "flatdict-4.0.1" / "setup.py").write_text(
-    "import setuptools\nsetuptools.setup()\n"
-)
-
-print("Building patched wheel...")
-subprocess.check_call([sys.executable, "-m", "pip", "wheel",
-    str(src / "flatdict-4.0.1"), "--no-deps", "-w", str(whl)])
-print("Done:", list(whl.iterdir()))
-EOF
-
-pip install 'isaaclab[isaacsim,all]==2.3.2' --extra-index-url https://pypi.nvidia.com --find-links /tmp/flatdict_whl/
+pip install 'isaaclab[isaacsim,all]==3.0.0' --extra-index-url https://pypi.nvidia.com
 pip install trimesh pymavlink 'mavsdk<4'
 
-# --- Final verification ---
-echo "=== conda envs ==="
-conda info --envs
-
-echo "=== import check ==="
-python -c "import isaaclab; print('isaaclab imported OK')"
+python -c "import importlib.metadata as m; print('isaacsim', m.version('isaacsim')); print('isaaclab', m.version('isaaclab'))"
 ```
+
+Do not `import isaacsim` in that check. Importing it starts the Kit kernel and stops on the Omniverse EULA. The simulation scripts set `OMNI_KIT_ACCEPT_EULA=yes` before they launch.
 
 ### 3. ROS2 Jazzy (system packages for rosbridge)
 
@@ -243,7 +140,20 @@ cd ~/PX4-Autopilot
 make px4_sitl
 ```
 
-### 7. Build the Isaac Sim Scene
+### 7. ArduPilot SITL
+
+Mode 1 and Mode 2 fly ArduCopter. The PX4 build above is the other autopilot and is not required for those modes.
+
+```bash
+git clone --recurse-submodules https://github.com/ArduPilot/ardupilot.git ~/ardupilot
+cd ~/ardupilot
+Tools/environment_install/install-prereqs-ubuntu.sh -y
+. ~/.profile
+```
+
+`sim_vehicle.py` builds the SITL binary on first launch.
+
+### 8. Build the Isaac Sim Scene
 
 Clone this repo and build the USD scene from the STL meshes:
 
@@ -252,16 +162,18 @@ git clone https://github.com/VFS-Go-Aero/CAD-for-isaacsim.git ~/go_aero_repo
 cd ~/go_aero_repo
 git checkout sgoss/isaac-sim-import
 
-# Copy meshes and scripts to working directory
-mkdir -p ~/go_aero/meshes
+# Copy meshes, the ArduPilot param file, and scripts to the working directory
+mkdir -p ~/go_aero/meshes ~/go_aero/params
 cp meshes/* ~/go_aero/meshes/
+cp simulation/params/go_aero_ardupilot.param ~/go_aero/params/
 cp simulation/build_scene.py simulation/open_scene.py simulation/px4_visualizer.py \
-   simulation/fly_demo.py simulation/px4_bridge.py \
-   simulation/_compat.py simulation/_frames.py ~/go_aero/
+   simulation/fly_demo.py simulation/px4_bridge.py simulation/ardupilot_bridge.py \
+   simulation/ardu_poshold.py simulation/add_lidar_tutorial.py \
+   simulation/_frames.py ~/go_aero/
 
 # Build the USD scene (headless, takes ~60s)
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate env_isaaclab_jazzy
+conda activate env_isaaclab_3
 export ROS_DISTRO=jazzy
 python ~/go_aero/build_scene.py --headless
 ```
@@ -288,8 +200,11 @@ export DISPLAY=:1  # or your display
 export ROS_DISTRO=jazzy
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate env_isaaclab_jazzy
-export LD_LIBRARY_PATH=$HOME/miniconda3/envs/env_isaaclab_jazzy/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/jazzy/lib:$LD_LIBRARY_PATH
+conda activate env_isaaclab_3
+# Isaac Sim 6.2 ships the ROS 2 libs in isaacsim.ros2.core. Jazzy is the
+# sim-host bridge. Humble libs are in the sibling humble/ directory, for the
+# Jetson container in issue #4. Do not source /opt/ros in this shell.
+export LD_LIBRARY_PATH=$HOME/miniconda3/envs/env_isaaclab_3/lib/python3.12/site-packages/isaacsim/exts/isaacsim.ros2.core/jazzy/lib:$LD_LIBRARY_PATH
 
 python ~/go_aero/px4_visualizer.py --device cuda --mavlink-port 14550
 ```
@@ -301,7 +216,7 @@ Wait for `Visualizer running!` (~90 seconds for Isaac Sim to boot)
 ```bash
 source ~/miniconda3/etc/profile.d/conda.sh
 conda deactivate 2>/dev/null
-conda activate env_isaaclab_jazzy
+conda activate env_isaaclab_3
 
 # Fly a square pattern (3 loops at 5m altitude)
 python ~/go_aero/fly_demo.py --loops 3 --altitude 5 --size 8
@@ -325,6 +240,72 @@ asyncio.run(run())
 "
 ```
 
+## Run ArduPilot
+
+Rebuild the scene first (`python ~/go_aero/build_scene.py --headless`) so `vehicle_scene.usd` exists. Use the same conda env and `LD_LIBRARY_PATH` as the PX4 visualizer terminal.
+
+### Mode 1 — ArduCopter SITL physics, Isaac Sim mirrors the pose
+
+ArduCopter flies its own quadrotor model. `px4_visualizer.py` listens on UDP 14550 and does not run PhysX. `ardu_poshold.py` listens on UDP 14540.
+
+Terminal 1:
+
+```bash
+cd ~/ardupilot
+Tools/autotest/sim_vehicle.py -v ArduCopter --no-rebuild \
+  --add-param-file=$HOME/go_aero/params/go_aero_ardupilot.param \
+  --out=udp:127.0.0.1:14550 \
+  --out=udp:127.0.0.1:14540
+```
+
+Terminal 2:
+
+```bash
+python ~/go_aero/px4_visualizer.py --device cuda --mavlink-port 14550
+```
+
+Wait for `Visualizer running!`
+
+Terminal 3:
+
+```bash
+python ~/go_aero/ardu_poshold.py --altitude 5 --throttle-pct 50 --hold 30
+```
+
+The script takes off, holds in POSHOLD, then lands and disarms.
+
+### Mode 2 — Isaac Sim PhysX, ArduCopter SITL in JSON lockstep
+
+Start the bridge before SITL. The bridge binds UDP 9002 and steps physics once per servo packet. Mission Planner connects to SITL's default TCP port 5760.
+
+Terminal 1:
+
+```bash
+python ~/go_aero/ardupilot_bridge.py --device cuda --port 9002
+```
+
+Wait for `Waiting for ArduPilot SITL`.
+
+Terminal 2:
+
+```bash
+cd ~/ardupilot
+Tools/autotest/sim_vehicle.py -v ArduCopter -f JSON --no-rebuild \
+  --add-param-file=$HOME/go_aero/params/go_aero_ardupilot.param \
+  --out=udp:127.0.0.1:14550 \
+  --out=udp:127.0.0.1:14540
+```
+
+Hover from Mission Planner, or from `ardu_poshold.py --port 14540`. A motor command of 0.5 produces the vehicle weight. The bridge replies once per servo packet and does not advance PhysX while it is waiting.
+
+### LiDAR tutorial
+
+```bash
+python ~/go_aero/add_lidar_tutorial.py --headless --hover 2.0 --duration 10
+```
+
+The chassis is held at the target altitude by an upward force while the RTX LiDAR reports ranges.
+
 ## Files
 
 | File | Description |
@@ -334,9 +315,13 @@ asyncio.run(run())
 | `simulation/` | Simulation scripts + dedicated docs (see [`simulation/README.md`](./simulation/README.md)) |
 | `simulation/build_scene.py` | Builds `vehicle_scene.usd` from STL meshes |
 | `simulation/open_scene.py` | Opens scene with optional hover controller |
-| `simulation/px4_visualizer.py` | Reads PX4 state via MAVLink, updates Isaac Sim |
+| `simulation/px4_visualizer.py` | Mirrors PX4 or ArduCopter pose into Isaac Sim |
 | `simulation/fly_demo.py` | MAVSDK script: takeoff, fly square, land |
-| `simulation/px4_bridge.py` | MAVLink bridge (for future HIL mode) |
+| `simulation/px4_bridge.py` | PX4 HIL bridge (PhysX sensors out, motor forces in) |
+| `simulation/ardupilot_bridge.py` | ArduCopter JSON bridge (PhysX lockstep) |
+| `simulation/ardu_poshold.py` | ArduCopter takeoff, POSHOLD, land |
+| `simulation/add_lidar_tutorial.py` | RTX LiDAR tutorial with altitude hold |
+| `simulation/params/go_aero_ardupilot.param` | ArduCopter airframe and avoidance parameters |
 | `simulation/ARCHITECTURE.md` | Process topology, data flow, coordinate frames |
 | `simulation/PX4_API.md` | MAVLink + MAVSDK reference for the simulation |
 
@@ -365,20 +350,17 @@ asyncio.run(run())
 
 ## Current Limitations
 
-- **Visualization only** — PX4 SIH handles all physics internally with a generic quadrotor model. Isaac Sim only mirrors the position.
-- **Generic physics** — Not using the real Go Aero mass, inertia, motor specs, or aerodynamics.
-- **No collision** — The 3D model has no rigid bodies or colliders in Isaac Sim.
-- **No sensors** — No simulated camera, LiDAR, or other sensors on the drone.
+- **Visualizer** — `px4_visualizer.py` mirrors PX4 SIH or ArduCopter SITL. Rigid bodies are disabled in that process so PhysX does not move the model.
+- **Placeholder dynamics** — The PhysX bridges use a 5 kg chassis and a linear thrust map (command 0.5 equals weight). That is not the real Go Aero mass, inertia, or propeller curve.
+- **LiDAR** — `add_lidar_tutorial.py`, and `--lidar` on either bridge, read an RTX LiDAR on the chassis mount.
 
 ## Next Steps for Accurate Simulation
 
-To switch from visualization to full Hardware-In-The-Loop (HIL) simulation:
+The PhysX bridges already apply motor thrust to the chassis. To match the aircraft:
 
-1. Get real vehicle specs (mass, motor KV, prop diameter/pitch, battery voltage)
-2. Add rigid body physics + collision to the Isaac Sim model
-3. Create motor thrust model (thrust = Ct × ρ × n² × D⁴)
-4. Switch PX4 to HIL mode (Isaac Sim sends sensor data, PX4 sends motor commands)
-5. Tune PX4 parameters to match real vehicle dynamics
+1. Replace the 5 kg box with measured mass, inertia, motor KV, prop diameter, and battery voltage
+2. Replace the linear thrust map with thrust = Ct × ρ × n² × D⁴
+3. Tune the autopilot against that model
 
 ## Troubleshooting
 
@@ -386,38 +368,29 @@ To switch from visualization to full Hardware-In-The-Loop (HIL) simulation:
 
 The conda env isn't properly activated. Check with `which python` — it should show:
 ```
-/home/ubuntu/miniconda3/envs/env_isaaclab_jazzy/bin/python
+/home/ubuntu/miniconda3/envs/env_isaaclab_3/bin/python
 ```
 
-If it shows `env_isaaclab` (without `_jazzy`) or `/usr/bin/python`, deactivate and re-activate:
+If it shows `/usr/bin/python`, deactivate and re-activate:
 ```bash
 conda deactivate
 conda deactivate
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate env_isaaclab_jazzy
+conda activate env_isaaclab_3
 which python  # verify correct path
 ```
 
-### `conda activate env_isaaclab_jazzy` fails / env doesn't exist
+### `conda activate env_isaaclab_3` fails / env doesn't exist
 
-The conda environment hasn't been created yet. Create it:
-```bash
-conda create -n env_isaaclab_jazzy python=3.11 -y
-conda activate env_isaaclab_jazzy
-pip install --force-reinstall setuptools wheel
-pip install isaacsim==5.1.0.0 isaaclab==2.3.2
-pip install trimesh pymavlink 'mavsdk<4'
-```
-
-Isaac Sim is ~15GB and takes several minutes to install via pip.
+The conda environment hasn't been created yet. Follow the install in section 2. Isaac Sim is ~15GB and takes several minutes to install via pip.
 
 ### `Error while loading conda entry point: conda-anaconda-tos`
 
 This is a harmless warning from conda plugins, not an error. Ignore it.
 
-### `_rclpy_pybind11.cpython-311` import error
+### ROS 2 import error in the Isaac shell
 
-System ROS2 Jazzy (Python 3.12) is conflicting with the conda env (Python 3.11). Do NOT `source /opt/ros/jazzy/setup.bash` in the same shell as the conda env. Rosbridge should run in a separate terminal with system Python.
+The conda env is Python 3.12 and Isaac Sim 6.2 loads ROS 2 from `isaacsim.ros2.core`. Do not `source /opt/ros/jazzy/setup.bash` or `/opt/ros/humble/setup.bash` in that shell. A system ROS shell belongs in its own terminal.
 
 ### PX4 says `Insufficient capacity` on AWS
 
