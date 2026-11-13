@@ -36,7 +36,7 @@ CAD-for-isaacsim/
 │   ├── px4_visualizer.py      mirror PX4 SIH pose into Isaac Sim   (default mode)
 │   ├── px4_bridge.py          PX4 HIL bridge (sensors out, motors in)
 │   ├── ardupilot_bridge.py    ArduCopter JSON lockstep bridge
-│   ├── ardu_poshold.py        ArduCopter takeoff, POSHOLD, land
+│   ├── ardu_poshold.py        ArduCopter GUIDED takeoff, hover, land
 │   ├── add_lidar_tutorial.py  RTX LiDAR tutorial with altitude hold
 │   ├── params/go_aero_ardupilot.param
 │   ├── joystick_control.py    (Phase 2) Xbox controller → MANUAL_CONTROL to PX4
@@ -107,7 +107,7 @@ The bridge requires the `chassis_IMU` prim to exist in the USD — rebuild the s
 |---|---|---|
 | 1 — ArduCopter | `cd ~/ardupilot && Tools/autotest/sim_vehicle.py -v ArduCopter --no-rebuild --add-param-file=$HOME/go_aero/params/go_aero_ardupilot.param --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14540` | `Ready to FLY` |
 | 2 — Isaac Sim | `python ~/go_aero/px4_visualizer.py --device cuda --mavlink-port 14550` | `Visualizer running!` |
-| 3 — Mission | `python ~/go_aero/ardu_poshold.py --altitude 5 --hold 30` | takeoff → POSHOLD → land |
+| 3 — Mission | `python ~/go_aero/ardu_poshold.py --altitude 5 --hold 30` | takeoff → GUIDED hover → land |
 
 ### ArduCopter PhysX bridge (JSON lockstep)
 
@@ -207,7 +207,7 @@ Then restart the PX4 terminal.
 | `px4_visualizer.py` | USD scene + MAVLink UDP `:14550` | viewport (physics off) | PX4 SIH or ArduCopter SITL |
 | `px4_bridge.py` | USD scene + MAVLink TCP `:4560` (bidirectional) | HIL_SENSOR / HIL_GPS out, HIL_ACTUATOR_CONTROLS in | PX4 SITL (HIL mode) |
 | `ardupilot_bridge.py` | USD scene + one SIM_JSON servo packet on UDP `:9002` | one JSON state reply per packet | ArduCopter `-f JSON` |
-| `ardu_poshold.py` | MAVLink UDP `:14540` | takeoff, POSHOLD, land | ArduCopter |
+| `ardu_poshold.py` | MAVLink UDP `:14540` | GUIDED takeoff, hover, land | ArduCopter |
 | `add_lidar_tutorial.py` | USD scene | RTX LiDAR ranges, upward hover force | — |
 | `fly_demo.py` | — | MAVSDK UDP `:14540` | PX4 (offboard) |
 | `joystick_control.py` | Xbox controller (USB) | MAVLink `MANUAL_CONTROL` over UDP `:14550` | PX4 GCS endpoint |

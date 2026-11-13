@@ -49,7 +49,7 @@ PX4's `simulator_mavlink` module is the one that opens the connection — it's t
 
 ### ArduCopter visualizer — SITL physics, Isaac Sim mirrors pose
 
-Same Isaac process as Mode 1. ArduCopter flies its built-in quadrotor. `sim_vehicle.py` sends MAVLink to UDP 14550 (the visualizer) and UDP 14540 (`ardu_poshold.py`). The visualizer disables the USD rigid bodies and does not play the timeline, so PhysX cannot drop the model through the ground plane. It requests `LOCAL_POSITION_NED`, `ATTITUDE`, and `SERVO_OUTPUT_RAW` with `SET_MESSAGE_INTERVAL` because ArduCopter ignores the legacy `REQUEST_DATA_STREAM` call.
+Same Isaac process as Mode 1. ArduCopter flies its built-in quadrotor. `sim_vehicle.py` sends MAVLink to UDP 14550 (the visualizer) and UDP 14540 (`ardu_poshold.py`). The visualizer disables the USD rigid bodies, deactivates the physics scene, and does not play the timeline, so PhysX cannot drop the model through the ground plane. The LiDAR heightfield stays inactive unless `--terrain` is passed, and the vehicle origin sits 0.53 m above the surface so the landing gear clears the ground plane. The frame mesh reaches 0.524 m below the origin after the Y-up rotation, farther than the collision box. Heartbeats of type `MAV_TYPE_GCS` are ignored, so stream requests go to ArduCopter rather than MAVProxy. It requests position, attitude, and servo output with both `REQUEST_DATA_STREAM` and `SET_MESSAGE_INTERVAL`.
 
 ### ArduCopter PhysX bridge — `ardupilot_bridge.py`
 

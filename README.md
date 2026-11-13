@@ -269,10 +269,10 @@ Wait for `Visualizer running!`
 Terminal 3:
 
 ```bash
-python ~/go_aero/ardu_poshold.py --altitude 5 --throttle-pct 50 --hold 30
+python ~/go_aero/ardu_poshold.py --altitude 5 --hold 30
 ```
 
-The script takes off, holds in POSHOLD, then lands and disarms.
+The script takes off in GUIDED, holds that position for 30 s, then lands and disarms.
 
 ### Mode 2 — Isaac Sim PhysX, ArduCopter SITL in JSON lockstep
 
@@ -319,7 +319,7 @@ The chassis is held at the target altitude by an upward force while the RTX LiDA
 | `simulation/fly_demo.py` | MAVSDK script: takeoff, fly square, land |
 | `simulation/px4_bridge.py` | PX4 HIL bridge (PhysX sensors out, motor forces in) |
 | `simulation/ardupilot_bridge.py` | ArduCopter JSON bridge (PhysX lockstep) |
-| `simulation/ardu_poshold.py` | ArduCopter takeoff, POSHOLD, land |
+| `simulation/ardu_poshold.py` | ArduCopter GUIDED takeoff, hover, land |
 | `simulation/add_lidar_tutorial.py` | RTX LiDAR tutorial with altitude hold |
 | `simulation/params/go_aero_ardupilot.param` | ArduCopter airframe and avoidance parameters |
 | `simulation/ARCHITECTURE.md` | Process topology, data flow, coordinate frames |

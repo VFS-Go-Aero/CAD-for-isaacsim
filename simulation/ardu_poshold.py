@@ -2,16 +2,18 @@
 """
 ArduPilot Copter SITL flight & obstacle avoidance test script (`ardu_poshold.py`).
 
-Supports two modes of operation:
-  1. `poshold` (default):
+Supports three modes of operation:
+  1. `guided` (default):
      - Connects via pymavlink on `udpin:0.0.0.0:14540` (configurable via `--port`).
-     - Waits for heartbeat and EKF GPS readiness.
+     - Waits for a vehicle heartbeat (MAVProxy's GCS heartbeat is ignored) and
+       for EKF GPS readiness.
      - Switches to `GUIDED`, arms, and takes off to `--altitude` (default 5.0 m).
-     - Sets RC3 throttle override (`--throttle-pct 50` -> 1500 PWM), switches to
-       `POSHOLD`, holds for `--hold` seconds while streaming periodic RC override
-       and GCS heartbeats, then switches to `LAND`, clears RC overrides, and disarms.
+     - Holds that position in `GUIDED` for `--hold` seconds, then `LAND` and disarm.
 
-  2. `guided-forward` (or when `--target-north N` is passed):
+  2. `poshold`:
+     - Same takeoff, then RC3 throttle override and `POSHOLD` for `--hold` seconds.
+
+  3. `guided-forward` (or when `--target-north N` is passed):
      - Takes off in `GUIDED` to `--altitude` (default 5.0 m).
      - Commands a forward position setpoint `(north=target_north, east=0, down=-altitude)`
        past the obstacle at `--obstacle-north` (default 5.0 m).
@@ -20,8 +22,8 @@ Supports two modes of operation:
        `AVOID_MARGIN` (default 2.0 m) in front of the obstacle before landing.
 
 Usage:
-  # Standard PosHold hover test:
-  python3 ~/go_aero/ardu_poshold.py --altitude 5 --throttle-pct 50 --hold 30
+  # GUIDED takeoff, 30 s hover, land:
+  python3 ~/go_aero/ardu_poshold.py --altitude 5 --hold 30
 
   # Obstacle avoidance forward stop test (target 8m north toward 5m obstacle):
   python3 ~/go_aero/ardu_poshold.py --mode guided-forward --target-north 8 --altitude 2.5 --hold 20
@@ -126,7 +128,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         '--hold',
         type=float,
         default=30.0,
-        help='Duration in seconds to hold in POSHOLD or GUIDED forward test (default: 30.0)',
+        help='Duration in seconds to hold after takeoff (default: 30.0)',
     )
     parser.add_argument(
         '--port',
@@ -136,9 +138,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         '--mode',
-        choices=('poshold', 'guided-forward'),
-        default='poshold',
-        help='Flight test mode: poshold (default) or guided-forward (obstacle avoidance test)',
+        choices=('guided', 'poshold', 'guided-forward'),
+        default='guided',
+        help='Flight test: guided hover (default), poshold, or guided-forward',
     )
     parser.add_argument(
         '--target-north',
@@ -159,6 +161,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='Expected ArduPilot AVOID_MARGIN in meters (default: 2.0)',
     )
     return parser
+
+
+def wait_for_vehicle_heartbeat(mav: Any, mavutil_mod: Any, timeout: float = 30.0):
+    """Return the first heartbeat that is not a ground station.
+
+    sim_vehicle.py forwards MAVProxy heartbeats (MAV_TYPE_GCS, system 255)
+    on the same UDP port as ArduCopter. pymavlink's wait_heartbeat() latches
+    onto whichever arrives first.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        remaining = max(0.0, deadline - time.time())
+        hb = mav.recv_match(type='HEARTBEAT', blocking=True, timeout=min(1.0, remaining))
+        if hb is None:
+            continue
+        if hb.type == mavutil_mod.mavlink.MAV_TYPE_GCS:
+            continue
+        mav.target_system = hb.get_srcSystem()
+        mav.target_component = hb.get_srcComponent()
+        return hb
+    return None
 
 
 def send_gcs_heartbeat(mav: Any, mavutil_mod: Any) -> None:
@@ -381,6 +404,54 @@ def send_guided_position_ned(
         float(yaw_rad),
         0.0,            # yaw_rate
     )
+
+
+def run_guided_hold(
+    mav: Any,
+    mavutil_mod: Any,
+    altitude_m: float,
+    hold_s: float,
+) -> None:
+    """Hold the post-takeoff north/east position at `altitude_m` in GUIDED."""
+    north = 0.0
+    east = 0.0
+    sample_deadline = time.time() + 2.0
+    while time.time() < sample_deadline:
+        msg = mav.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=0.5)
+        if msg is not None:
+            north = float(msg.x)
+            east = float(msg.y)
+            break
+
+    down_m = -abs(float(altitude_m))
+    print(
+        f'[GUIDED] Holding N={north:+.2f}m E={east:+.2f}m at {altitude_m:.1f} m '
+        f'for {hold_s:.0f}s',
+        flush=True,
+    )
+    start_t = time.time()
+    last_cmd = 0.0
+    last_log = 0.0
+    alt_m = altitude_m
+    while time.time() - start_t < hold_s:
+        now = time.time()
+        if now - last_cmd >= 0.2:
+            last_cmd = now
+            send_guided_position_ned(mav, mavutil_mod, north, east, down_m, 0.0)
+            send_gcs_heartbeat(mav, mavutil_mod)
+
+        msg = mav.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=0.1)
+        if msg is not None:
+            alt_m = -float(msg.z)
+
+        elapsed = time.time() - start_t
+        if elapsed - last_log >= 2.0:
+            last_log = elapsed
+            print(
+                f'[GUIDED] t={elapsed:4.1f}/{hold_s:.0f}s  '
+                f'N={north:+.2f}m E={east:+.2f}m Alt={alt_m:+.2f}m',
+                flush=True,
+            )
 
 
 def run_poshold_phase(mav: Any, mavutil_mod: Any, throttle_pct: float, hold_s: float) -> None:
@@ -619,10 +690,10 @@ def main() -> None:
     print(f'[INFO] Connecting to ArduPilot on udpin:0.0.0.0:{args.port}...', flush=True)
     mav = mavutil.mavlink_connection(f'udpin:0.0.0.0:{args.port}', source_system=255)
 
-    print('[INFO] Waiting for ArduPilot heartbeat...', flush=True)
-    hb = mav.wait_heartbeat(timeout=30)
+    print('[INFO] Waiting for ArduPilot vehicle heartbeat...', flush=True)
+    hb = wait_for_vehicle_heartbeat(mav, mavutil, timeout=30)
     if hb is None:
-        print('[ERROR] No heartbeat received within 30s.', flush=True)
+        print('[ERROR] No vehicle heartbeat received within 30s.', flush=True)
         sys.exit(1)
     print(
         f'[INFO] Connected to system {mav.target_system}, component {mav.target_component}',
@@ -652,11 +723,18 @@ def main() -> None:
                 avoid_margin_m=args.avoid_margin,
                 hold_s=args.hold,
             )
-        else:
+        elif effective_mode == 'poshold':
             run_poshold_phase(
                 mav=mav,
                 mavutil_mod=mavutil,
                 throttle_pct=args.throttle_pct,
+                hold_s=args.hold,
+            )
+        else:
+            run_guided_hold(
+                mav=mav,
+                mavutil_mod=mavutil,
+                altitude_m=args.altitude,
                 hold_s=args.hold,
             )
     except KeyboardInterrupt:

@@ -31,6 +31,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--mavlink-port', type=int, default=14550, help='PX4 MAVLink UDP port')
 parser.add_argument('--load-only', action='store_true',
                     help='Load the scene and exit. Skips the MAVLink connection.')
+parser.add_argument('--terrain', action='store_true',
+                    help='Show the LiDAR heightfield. Off by default so the vehicle rests on the ground plane.')
 # Isaac Lab 3 no longer registers --headless (headless unless --viz kit)
 # but still honors a 'headless' launcher arg. Register it before AppLauncher.
 parser.add_argument('--headless', action='store_true', help='Run without a viewport')
@@ -132,7 +134,68 @@ def _freeze_physics(stage):
         body.CreateKinematicEnabledAttr(True)
 
 
+def _terrain_height(east_m, north_m, amplitude=0.5):
+    """Match the heightfield authored by build_scene.add_terrain."""
+    return (
+        amplitude * math.sin(east_m * 0.8) * math.cos(north_m * 0.6)
+        + (amplitude * 0.5) * math.sin(east_m * 1.5 + 1.0)
+        + (amplitude * 0.3) * math.cos(north_m * 2.0 + 0.5)
+    )
+
+
+def _deactivate(stage, path):
+    prim = stage.GetPrimAtPath(path)
+    if prim.IsValid():
+        prim.SetActive(False)
+        print(f'[INFO] Deactivated {path}', flush=True)
+
+
+# frame.stl is Y-up. After the +90 deg mesh fix, mesh Y is world Z, and the
+# landing gear reaches mesh Y=-0.524. The collision box only extends to
+# -0.275, so a clearance based on the box leaves the feet in the ground plane.
+# 0.53 m puts the lowest vertex about 6 mm above the surface at zero altitude.
+BELLY_CLEARANCE_M = 0.53
+
+def _chassis_local_translate(stage):
+    """Return the chassis translate op value, or None when the op does not exist."""
+    prim = stage.GetPrimAtPath('/World/Vehicle/chassis')
+    if not prim.IsValid():
+        return None
+    for op in UsdGeom.Xformable(prim).GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            value = op.Get()
+            if value is not None:
+                return (float(value[0]), float(value[1]), float(value[2]))
+    return None
+
+
+def _pin_chassis_local(stage):
+    """Keep the body on the vehicle origin. PhysX must not leave a residual."""
+    prim = stage.GetPrimAtPath('/World/Vehicle/chassis')
+    if not prim.IsValid():
+        return
+    if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+        body = UsdPhysics.RigidBodyAPI(prim)
+        body.CreateRigidBodyEnabledAttr(False)
+        body.CreateKinematicEnabledAttr(True)
+    for op in UsdGeom.Xformable(prim).GetOrderedXformOps():
+        if op.GetOpType() != UsdGeom.XformOp.TypeTranslate:
+            continue
+        value = op.Get()
+        if value is None:
+            continue
+        if abs(float(value[0])) + abs(float(value[1])) + abs(float(value[2])) < 1e-6:
+            continue
+        op.Set(type(value)(0, 0, 0))
+
+
 _freeze_physics(stage)
+_pin_chassis_local(stage)
+physics_scene = stage.GetPrimAtPath('/World/PhysicsScene')
+if physics_scene.IsValid():
+    physics_scene.SetActive(False)
+if not args.terrain:
+    _deactivate(stage, '/World/Terrain')
 timeline = omni.timeline.get_timeline_interface()
 timeline.stop()
 print('[INFO] Physics frozen. Visualizer mirrors MAVLink pose only.', flush=True)
@@ -189,6 +252,10 @@ def mavlink_receiver():
                     ]
 
             elif msg_type == 'HEARTBEAT':
+                if msg.type == mavutil.mavlink.MAV_TYPE_GCS:
+                    continue
+                if msg.get_srcSystem() != mav.target_system:
+                    continue
                 with state_lock:
                     vehicle_state['armed'] = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
 
@@ -196,21 +263,48 @@ def mavlink_receiver():
             time.sleep(0.1)
 
 
-recv_thread = threading.Thread(target=mavlink_receiver, daemon=True)
-recv_thread.start()
-print('[INFO] MAVLink receiver started, waiting for PX4 data...')
+def _wait_for_autopilot(connection, timeout=30.0):
+    """Latch onto the vehicle. MAVProxy heartbeats are MAV_TYPE_GCS."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        remaining = deadline - time.time()
+        hb = connection.recv_match(type='HEARTBEAT', blocking=True, timeout=min(1.0, remaining))
+        if hb is None:
+            continue
+        if hb.type == mavutil.mavlink.MAV_TYPE_GCS:
+            print(
+                f'[INFO] Ignoring GCS heartbeat from system {hb.get_srcSystem()}',
+                flush=True,
+            )
+            continue
+        connection.target_system = hb.get_srcSystem()
+        connection.target_component = hb.get_srcComponent()
+        return hb
+    return None
 
-# Wait for first message
-print('[INFO] Waiting for PX4 heartbeat...')
-mav.wait_heartbeat(timeout=30)
-print(f'[INFO] PX4 connected! System {mav.target_system}, component {mav.target_component}')
 
-# PX4 still honors the legacy stream request. ArduCopter ignores it and
-# uses SET_MESSAGE_INTERVAL, so send both.
-mav.mav.request_data_stream_send(
-    mav.target_system, mav.target_component,
-    mavutil.mavlink.MAV_DATA_STREAM_ALL, 50, 1  # 50 Hz all streams
+print('[INFO] Waiting for autopilot heartbeat (ignoring GCS)...')
+heartbeat = _wait_for_autopilot(mav, timeout=30)
+if heartbeat is None:
+    print('[ERROR] No vehicle heartbeat within 30s.', flush=True)
+    simulation_app.close()
+    raise SystemExit(1)
+print(
+    f'[INFO] Autopilot connected. System {mav.target_system}, '
+    f'component {mav.target_component}, type {heartbeat.type}',
+    flush=True,
 )
+
+# PX4 still honors REQUEST_DATA_STREAM. ArduCopter ignores it and uses
+# SET_MESSAGE_INTERVAL, so send both, and only to the vehicle.
+for stream in (
+    mavutil.mavlink.MAV_DATA_STREAM_POSITION,
+    mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+    mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+):
+    mav.mav.request_data_stream_send(
+        mav.target_system, mav.target_component, stream, 50, 1,
+    )
 for msg_id, hz in (
     (mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED, 50),
     (mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE, 50),
@@ -224,6 +318,8 @@ for msg_id, hz in (
         0, 0, 0, 0, 0,
     )
 
+recv_thread = threading.Thread(target=mavlink_receiver, daemon=True)
+recv_thread.start()
 print('[INFO] Visualizer running!')
 print('[INFO] ArduCopter: python ardu_poshold.py --port 14540')
 print('[INFO] PX4: commander arm / takeoff / land, or python fly_demo.py', flush=True)
@@ -236,6 +332,9 @@ prop_dirs = {'prop_fr': 1.0, 'prop_fl': -1.0, 'prop_rr': -1.0, 'prop_rl': 1.0}
 step = 0
 try:
     while simulation_app.is_running():
+        # A viewport Play click would step PhysX on the child rigid bodies.
+        if timeline.is_playing():
+            timeline.stop()
         app.update()
         step += 1
 
@@ -249,12 +348,17 @@ try:
             motors = vehicle_state['motors'][:]
             is_armed = vehicle_state['armed']
 
-        # Update vehicle position (offset so feet sit on ground)
-        v_translate_op.Set(Gf.Vec3d(x, y, max(0.5, z + 0.5)))
+        # SITL altitude is height above a flat home. The landing gear extends
+        # BELLY_CLEARANCE_M below the vehicle origin. With --terrain, lift
+        # by the heightfield so the feet stay above the hills.
+        surface = _terrain_height(x, y) if args.terrain else 0.0
+        v_translate_op.Set(Gf.Vec3d(x, y, surface + BELLY_CLEARANCE_M + max(0.0, z)))
 
         # Update vehicle orientation: PX4 NED body attitude -> ENU world
         # quaternion (with mesh fix folded in). See attitude_to_world_quat above.
         v_orient_op.Set(attitude_to_world_quat(roll, pitch, yaw))
+        chassis_local = _chassis_local_translate(stage)
+        _pin_chassis_local(stage)
 
         # Spin props based on motor output
         for i, name in enumerate(['prop_fr', 'prop_fl', 'prop_rr', 'prop_rl']):
@@ -278,11 +382,23 @@ try:
                 if rotate_attr:
                     rotate_attr.Set(float(prop_angles[name] % 360.0))
 
-        # Status log
+        # Status log. chassis_local stays (0,0,0) when PhysX is not pulling the body.
         if step % 300 == 0:
             status = "ARMED" if is_armed else "DISARMED"
             avg_motor = sum(motors) / 4.0
-            print(f'[INFO] step {step}, pos=({x:.1f},{y:.1f},{z:.1f}), {status}, throttle={avg_motor:.0%}', flush=True)
+            chassis_prim = stage.GetPrimAtPath('/World/Vehicle/chassis')
+            if chassis_local is None:
+                local_t = '(0.000,0.000,0.000)'
+            else:
+                local_t = f'({chassis_local[0]:.3f},{chassis_local[1]:.3f},{chassis_local[2]:.3f})'
+            world_z = float('nan')
+            if chassis_prim.IsValid():
+                world_z = UsdGeom.Xformable(chassis_prim).ComputeLocalToWorldTransform(0).ExtractTranslation()[2]
+            print(
+                f'[INFO] step {step}, pos=({x:.1f},{y:.1f},{z:.1f}), {status}, '
+                f'throttle={avg_motor:.0%}, chassis_local={local_t}, chassis_world_z={world_z:.2f}',
+                flush=True,
+            )
 
         # Static camera — no follow (set once at start)
 
