@@ -31,6 +31,8 @@ source ~/.bashrc
 
 Isaac Lab 3.0 requires Python 3.12. The `isaacsim` extra pins `isaacsim[all,extscache]==6.2.0.0`. Accept the conda terms of service before creating the env, or the create step fails and later pip installs land on the system Python.
 
+Plain `pip` cannot install this extra. `isaaclab==3.0.0` requires `urllib3>=2.8.0`, and `isaacsim-kernel==6.2.0.0` pins `urllib3==2.7.0`. Isaac Lab's 3.0.0 install uses `uv` with their override file, which keeps `urllib3==2.8.0` and selects the CUDA 13.0 PyTorch build.
+
 ```bash
 source ~/miniconda3/etc/profile.d/conda.sh
 conda config --set auto_activate_base false
@@ -39,8 +41,12 @@ conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
 
 conda create -n env_isaaclab_3 python=3.12 -y
 conda activate env_isaaclab_3
-pip install --upgrade pip setuptools
-pip install 'isaaclab[isaacsim,all]==3.0.0' --extra-index-url https://pypi.nvidia.com
+pip install --upgrade pip setuptools uv
+uv pip install 'isaaclab[isaacsim,all]==3.0.0' \
+  --overrides https://raw.githubusercontent.com/isaac-sim/IsaacLab/v3.0.0/tools/wheel_builder/uv-overrides.txt \
+  --extra-index-url https://pypi.nvidia.com \
+  --torch-backend cu130 \
+  --index-strategy unsafe-best-match
 pip install trimesh pymavlink 'mavsdk<4'
 
 python -c "import importlib.metadata as m; print('isaacsim', m.version('isaacsim')); print('isaaclab', m.version('isaaclab'))"
