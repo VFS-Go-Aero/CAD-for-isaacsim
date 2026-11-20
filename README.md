@@ -184,7 +184,7 @@ export ROS_DISTRO=jazzy
 python ~/go_aero/build_scene.py --headless
 ```
 
-This creates `~/go_aero/vehicle_scene.usd` with the Go Aero model, ground plane, and lighting.
+This creates `~/go_aero/assets/vehicle_scene.usd` with the Go Aero model, ground plane, and lighting.
 
 ## Run the Demo
 

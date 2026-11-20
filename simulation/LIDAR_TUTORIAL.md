@@ -32,7 +32,7 @@ characteristics.
 python build_scene.py --headless
 ```
 
-This creates `~/go_aero/vehicle_scene.usd` with the drone model,
+This creates `~/go_aero/assets/vehicle_scene.usd` with the drone model,
 physics, and the `lidar_mount` Xform under the chassis.
 
 3. Verify the mount point exists:
@@ -116,7 +116,7 @@ Isaac Sim sensor types (Rotary vs. Solid State).
 ```python
 from isaaclab.app import AppLauncher
 # ... parse args, launch app ...
-omni.usd.get_context().open_stage('~/go_aero/vehicle_scene.usd')
+omni.usd.get_context().open_stage('~/go_aero/assets/vehicle_scene.usd')
 ```
 
 Isaac Sim must be launched (via `AppLauncher`) before importing any

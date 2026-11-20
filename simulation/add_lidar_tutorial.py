@@ -102,7 +102,7 @@ app = omni.kit.app.get_app()
 # build_scene.py and contains the full quadrotor with physics, joints,
 # and sensor mount points.
 print('[TUTORIAL] Opening vehicle_scene.usd...', flush=True)
-usd_path = os.path.expanduser('~/go_aero/vehicle_scene.usd')
+usd_path = os.path.expanduser('~/go_aero/assets/vehicle_scene.usd')
 omni.usd.get_context().open_stage(usd_path)
 
 # Wait for the stage to finish loading. The loading_status tuple is

@@ -53,7 +53,7 @@ app = omni.kit.app.get_app()
 # Load scene
 # ============================================================
 print('[INFO] Opening vehicle scene...')
-omni.usd.get_context().open_stage(os.path.expanduser('~/go_aero/vehicle_scene.usd'))
+omni.usd.get_context().open_stage(os.path.expanduser('~/go_aero/assets/vehicle_scene.usd'))
 
 for i in range(300):
     app.update()

@@ -56,7 +56,9 @@ CAD-for-isaacsim/
 ├── ardupilot/                                    ArduCopter SITL
 └── go_aero/                                      runtime working dir
     ├── meshes/                                   copy of repo meshes
-    ├── vehicle_scene.usd                         built by build_scene.py
+    ├── assets/
+    │   ├── vehicle_scene.usd                     built by build_scene.py
+    │   └── ground_plane/                         plane USDA and checker textures
     ├── build_scene.py
     ├── open_scene.py
     ├── px4_visualizer.py
@@ -68,7 +70,7 @@ CAD-for-isaacsim/
     └── params/go_aero_ardupilot.param
 ```
 
-The scripts read the scene from `~/go_aero/vehicle_scene.usd` (a hard-coded path inside each script — see the *Updating* section if you need to change this).
+The scripts read the scene from `~/go_aero/assets/vehicle_scene.usd` (a hard-coded path inside each script — see the *Updating* section if you need to change this).
 
 ---
 
@@ -202,8 +204,8 @@ Then restart the PX4 terminal.
 
 | File | Reads | Writes | Other side |
 |---|---|---|---|
-| `build_scene.py` | `~/go_aero/meshes/*.stl` | `~/go_aero/vehicle_scene.usd` | — |
-| `open_scene.py` | `~/go_aero/vehicle_scene.usd` | viewport | — (standalone, no PX4) |
+| `build_scene.py` | `~/go_aero/meshes/*.stl` | `~/go_aero/assets/vehicle_scene.usd` | — |
+| `open_scene.py` | `~/go_aero/assets/vehicle_scene.usd` | viewport | — (standalone, no PX4) |
 | `px4_visualizer.py` | USD scene + MAVLink UDP `:14550` | viewport (physics off) | PX4 SIH or ArduCopter SITL |
 | `px4_bridge.py` | USD scene + MAVLink TCP `:4560` (bidirectional) | HIL_SENSOR / HIL_GPS out, HIL_ACTUATOR_CONTROLS in | PX4 SITL (HIL mode) |
 | `ardupilot_bridge.py` | USD scene + one SIM_JSON servo packet on UDP `:9002` | one JSON state reply per packet | ArduCopter `-f JSON` |

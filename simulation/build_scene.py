@@ -12,6 +12,7 @@ Usage:
   # Then: python open_scene.py --device cuda
 """
 import os
+import shutil
 os.environ['OMNI_KIT_ACCEPT_EULA'] = 'yes'
 
 from isaaclab.app import AppLauncher
@@ -253,10 +254,128 @@ print('[BUILD] Physics setup complete.')
 for _ in range(30):
     app.update()
 
+def anchor_ground_plane(stage, scene_path):
+    """Point the ground plane at a copy that lives beside the scene file.
+
+    GroundPlaneCfg localizes the Isaac Lab plane into a new /tmp directory
+    on every run. Export stores that path, and the collider vanishes when
+    the directory is removed. The saved copy is one USDA plus a textures
+    folder, without the numbered /tmp directories.
+    """
+    from pxr import UsdUtils
+
+    prim = stage.GetPrimAtPath('/World/GroundPlane')
+    if not prim.IsValid():
+        raise RuntimeError('Ground plane prim is missing')
+
+    asset_paths = []
+    for spec in prim.GetPrimStack():
+        for ref in list(spec.referenceList.prependedItems) + list(spec.referenceList.explicitItems):
+            asset_paths.append(ref.assetPath)
+    if len(asset_paths) != 1:
+        raise RuntimeError(f'Expected one ground-plane reference, found {asset_paths}')
+
+    src = asset_paths[0]
+    if not os.path.isabs(src):
+        src = os.path.normpath(os.path.join(os.path.dirname(stage.GetRootLayer().identifier), src))
+    if not os.path.isfile(src):
+        raise RuntimeError(f'Ground plane asset is missing: {src}')
+    src = os.path.abspath(src)
+    source_dir = os.path.dirname(src)
+
+    plane_dir = os.path.join(os.path.dirname(scene_path), 'ground_plane')
+    textures_dir = os.path.join(plane_dir, 'textures')
+    if os.path.isdir(plane_dir):
+        shutil.rmtree(plane_dir)
+    os.makedirs(textures_dir)
+    dest_usda = os.path.join(plane_dir, 'default_ground_plane.usda')
+    shutil.copy2(src, dest_usda)
+
+    image_exts = {'.png', '.jpg', '.jpeg', '.exr', '.hdr', '.tif', '.tiff'}
+    copied = {src: dest_usda}
+    leftovers = []
+
+    def place_file(abs_path):
+        abs_path = os.path.normpath(abs_path)
+        if abs_path in copied:
+            return copied[abs_path]
+        ext = os.path.splitext(abs_path)[1].lower()
+        folder = textures_dir if ext in image_exts else plane_dir
+        dest = os.path.join(folder, os.path.basename(abs_path))
+        if os.path.exists(dest):
+            stem, suffix = os.path.splitext(os.path.basename(abs_path))
+            dest = os.path.join(folder, f'{stem}_{len(copied)}{suffix}')
+        shutil.copy2(abs_path, dest)
+        copied[abs_path] = dest
+        return dest
+
+    def resolve_existing(asset_path):
+        if not asset_path or '://' in asset_path:
+            return None
+        if os.path.isabs(asset_path):
+            candidate = os.path.normpath(asset_path)
+        else:
+            candidate = os.path.normpath(os.path.join(source_dir, asset_path))
+        return candidate if os.path.isfile(candidate) else None
+
+    layer = Sdf.Layer.FindOrOpen(dest_usda)
+    if layer is None:
+        raise RuntimeError(f'Could not open ground-plane layer: {dest_usda}')
+    changed = False
+
+    def rewrite(asset_path):
+        nonlocal changed
+        existing = resolve_existing(asset_path)
+        if existing is None:
+            if isinstance(asset_path, str) and asset_path.startswith('/tmp'):
+                leftovers.append(asset_path)
+            return asset_path
+        dest = place_file(existing)
+        rel = os.path.relpath(dest, plane_dir).replace(os.sep, '/')
+        if rel != asset_path:
+            changed = True
+        if rel.startswith('/tmp'):
+            leftovers.append(rel)
+        return rel
+
+    UsdUtils.ModifyAssetPaths(layer, rewrite)
+    if leftovers:
+        raise RuntimeError('Ground plane still references /tmp: ' + '; '.join(leftovers))
+    if changed and not layer.Export(dest_usda):
+        raise RuntimeError(f'Could not save ground-plane layer: {dest_usda}')
+    if not os.path.isfile(dest_usda):
+        raise RuntimeError(f'Copied ground plane is missing: {dest_usda}')
+
+    rel_asset = os.path.relpath(dest_usda, os.path.dirname(scene_path)).replace(os.sep, '/')
+    prim.GetReferences().SetReferences([Sdf.Reference(rel_asset)])
+    print(f'[BUILD] Ground plane reference: {rel_asset}', flush=True)
+
+
+def verify_ground_plane(scene_path):
+    from pxr import Usd
+    opened = Usd.Stage.Open(scene_path)
+    if not opened:
+        raise RuntimeError(f'Could not open {scene_path}')
+    plane = None
+    for prim in opened.Traverse():
+        if str(prim.GetPath()).startswith('/World/GroundPlane') and prim.GetTypeName() == 'Plane':
+            plane = prim
+            break
+    if plane is None:
+        raise RuntimeError('Exported scene has no ground-plane collider')
+    print(
+        f'[BUILD] Ground collider: {plane.GetPath()} schemas={list(plane.GetAppliedSchemas())}',
+        flush=True,
+    )
+
+
 # ============================================================
 # Save
 # ============================================================
-out = os.path.expanduser('~/go_aero/vehicle_scene.usd')
+out = os.path.expanduser('~/go_aero/assets/vehicle_scene.usd')
+os.makedirs(os.path.dirname(out), exist_ok=True)
+anchor_ground_plane(stage, out)
 stage.GetRootLayer().Export(out)
 print(f'[BUILD] Saved: {out} ({os.path.getsize(out)} bytes)')
+verify_ground_plane(out)
 simulation_app.close()

@@ -201,7 +201,7 @@ def pressure_from_altitude(alt_m):
 # Scene load
 # ============================================================
 print('[INFO] Opening vehicle scene...', flush=True)
-omni.usd.get_context().open_stage(os.path.expanduser('~/go_aero/vehicle_scene.usd'))
+omni.usd.get_context().open_stage(os.path.expanduser('~/go_aero/assets/vehicle_scene.usd'))
 
 for i in range(300):
     app.update()

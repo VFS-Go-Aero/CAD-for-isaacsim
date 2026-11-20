@@ -134,7 +134,7 @@ Pure-USD scene assembly. Run once per scene structure change.
 4. **Chassis** — rigid body, `mass = 5 kg`, simplified box collider, marked as `ArticulationRootAPI`
 5. **4 propellers** — each: STL mesh, rigid body (`0.1 kg`), revolute joint to chassis around Y axis, `DriveAPI('angular')` with velocity drive (stiffness=0, damping=0.5)
 
-Output: `~/go_aero/vehicle_scene.usd`. The visualizer reads this read-only.
+Output: `~/go_aero/assets/vehicle_scene.usd`. The visualizer reads this read-only.
 
 ### `open_scene.py`  *(standalone, no autopilot — for testing the scene + physics)*
 

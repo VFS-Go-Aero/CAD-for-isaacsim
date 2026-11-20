@@ -314,9 +314,61 @@ def mesh_body_to_frd(v: Sequence[float]):
     return _vec((-float(v[2]), float(v[0]), -float(v[1])))
 
 
+# Scene gravity is (0, 0, -9.81) in ENU. Specific force is kinematic
+# acceleration minus this vector.
+GRAVITY_ENU = (0.0, 0.0, -9.81)
+# Horizontal and vertical velocity are the one-step pose rate and the rigid-body
+# vz, each lowpassed at 0.02 s. The raw step rate matches PhysX, and the
+# lowpass keeps a single noisy step from becoming a lean command. Specific
+# force is the derivative of this velocity. Gyro is the quaternion rate; a
+# single step above 8 rad/s is dropped.
+LIN_ACC_TAU_S = 0.02
+VZ_TAU_S = 0.02
+VXY_TAU_S = 0.02
+
+
+def world_vector_to_frd(quat_wxyz: Sequence[float], v_enu: Sequence[float]):
+    """Rotate a world ENU vector into FRD with the chassis quaternion."""
+    return mesh_body_to_frd(quat_rotate(quat_conj(quat_wxyz), v_enu))
+
+
+def _rotvec_from_quat(q_wxyz: Sequence[float]):
+    """Rotation vector (axis * angle) of a quaternion, shortest path."""
+    w = float(q_wxyz[0])
+    x, y, z = float(q_wxyz[1]), float(q_wxyz[2]), float(q_wxyz[3])
+    if w < 0.0:
+        w, x, y, z = -w, -x, -y, -z
+    w = max(-1.0, min(1.0, w))
+    angle = 2.0 * math.acos(w)
+    s = math.sqrt(max(0.0, 1.0 - w * w))
+    if s < 1e-8:
+        return (0.0, 0.0, 0.0)
+    return (x / s * angle, y / s * angle, z / s * angle)
+
+
+def specific_force_frd(quat_wxyz: Sequence[float], lin_acc_enu: Sequence[float]):
+    """FRD specific force from world ENU kinematic acceleration and attitude.
+
+    The Isaac IMU keeps reporting rest gravity along its original sensor axes
+    after the rigid body has rotated, so that reading disagrees with the
+    attitude in the same JSON packet. ArduPilot's EKF then rejects GPS and
+    resets yaw. Specific force is taken from the rigid body instead.
+    """
+    specific_enu = (
+        float(lin_acc_enu[0]) - GRAVITY_ENU[0],
+        float(lin_acc_enu[1]) - GRAVITY_ENU[1],
+        float(lin_acc_enu[2]) - GRAVITY_ENU[2],
+    )
+    return world_vector_to_frd(quat_wxyz, specific_enu)
+
+
 def enu_to_ned(v: Sequence[float]):
     """Convert an ENU vector (east, north, up) to NED (north, east, down)."""
     return _vec((float(v[1]), float(v[0]), -float(v[2])))
+
+
+# Authored /World/Vehicle orientation: RotateX(90), nose north, level.
+AUTHORED_QUAT_WXYZ = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
 
 
 def enu_quat_to_ned_euler(q_wxyz: Sequence[float]):
@@ -382,6 +434,298 @@ def compute_motor_forces_and_torques(
     return _vec((fx, fy, fz)), _vec((mx, my, mz))
 
 
+def run_velocity_check(chassis, imu, app, stage) -> None:
+    """Print which velocity reading matches the change in the chassis pose.
+
+    Gravity is off, so a commanded velocity should come back as the same
+    displacement. The four candidates are the ones that usually explain a
+    velocity that only disagrees once the body is tilted: the value as read,
+    that value rotated between body and world, and a shift from the center
+    of mass to the prim origin.
+    """
+    import carb
+    import omni.timeline
+    from pxr import Usd
+    from isaacsim.core.simulation_manager import SimulationManager
+    ground = stage.GetPrimAtPath('/World/GroundPlane')
+    print(
+        f'[VEL] ground valid={ground.IsValid()} children={ground.GetChildrenNames() if ground else None} '
+        f'schemas={list(ground.GetAppliedSchemas()) if ground else None}',
+        flush=True,
+    )
+    if ground:
+        for spec in ground.GetPrimStack():
+            print(f'[VEL] ground stack {spec.layer.identifier} {spec.path}', flush=True)
+    for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
+        path = str(prim.GetPath())
+        if path.startswith('/World/GroundPlane'):
+            print(
+                f'[VEL] ground child {path} type={prim.GetTypeName()} '
+                f'schemas={list(prim.GetAppliedSchemas())}',
+                flush=True,
+            )
+    from isaacsim.core.experimental.prims import RigidPrim
+    from pxr import Gf, PhysxSchema, UsdGeom, UsdPhysics
+
+    def settle(tag: str) -> None:
+        chassis.set_world_poses(
+            positions=np.array([[0.0, 0.0, 0.16]], dtype=np.float32),
+            orientations=np.array([list(AUTHORED_QUAT_WXYZ)], dtype=np.float32),
+        )
+        chassis.set_velocities(
+            linear_velocities=np.zeros((1, 3), dtype=np.float32),
+            angular_velocities=np.zeros((1, 3), dtype=np.float32),
+        )
+        timeline = omni.timeline.get_timeline_interface()
+        t0 = timeline.get_current_time()
+        steps0 = SimulationManager.get_num_physics_steps()
+        app.update()
+        step_dt = timeline.get_current_time() - t0
+        for _ in range(SENSOR_RATE - 1):
+            app.update()
+        settled, _ = chassis.get_world_poses()
+        vel, _ = chassis.get_velocities()
+        vz = float(vel.numpy()[0][2])
+        n_steps = SimulationManager.get_num_physics_steps() - steps0
+        print(
+            f'[VEL] {tag} z={float(settled.numpy()[0][2]):+.3f} '
+            f'timeline_dt={step_dt:.6f} steps={n_steps} vz={vz:+.3f}',
+            flush=True,
+        )
+
+    settle('wall-clock')
+    from omni.kit.loop import _loop as omni_loop
+    loop_runner = omni_loop.acquire_loop_interface()
+    loop_runner.set_manual_step_size(SIM_DT)
+    loop_runner.set_manual_mode(True)
+    omni.timeline.get_timeline_interface().set_time_codes_per_second(SENSOR_RATE)
+    settle('manual 4 ms')
+
+    physics_prim = stage.GetPrimAtPath('/World/PhysicsScene')
+    scene = UsdPhysics.Scene(physics_prim) if physics_prim.IsValid() else None
+    saved_gravity = None
+    if scene is not None:
+        saved_gravity = scene.GetGravityMagnitudeAttr().Get()
+        scene.CreateGravityMagnitudeAttr(0.0)
+
+    try:
+        import carb
+        local_space = carb.settings.get_settings().get('/physics/outputVelocitiesLocalSpace')
+    except Exception as exc:
+        local_space = f'unavailable ({exc})'
+    settings = carb.settings.get_settings()
+    for key in (
+        '/app/player/useFixedTimeStepping',
+        '/app/player/timeStep',
+        '/persistent/simulation/minFrameRate',
+        '/physics/timeStepsPerSecond',
+    ):
+        print(f'[VEL] setting {key}={settings.get(key)}', flush=True)
+    print(f'[VEL] /physics/outputVelocitiesLocalSpace = {local_space}', flush=True)
+    print(
+        f'[VEL] stage meters/unit={UsdGeom.GetStageMetersPerUnit(stage)}  '
+        f'SimulationManager dt={SimulationManager.get_physics_dt()}  SIM_DT={SIM_DT}',
+        flush=True,
+    )
+    for prim in stage.Traverse():
+        if prim.GetTypeName() == 'PhysicsScene' or prim.HasAPI(UsdPhysics.Scene):
+            steps = None
+            if prim.HasAPI(PhysxSchema.PhysxSceneAPI):
+                steps = PhysxSchema.PhysxSceneAPI(prim).GetTimeStepsPerSecondAttr().Get()
+            print(f'[VEL] scene {prim.GetPath()} steps/s={steps}', flush=True)
+    chassis_prim = chassis.prims[0]
+    print(
+        f'[VEL] chassis type={chassis_prim.GetTypeName()} '
+        f'articulationRoot={chassis_prim.HasAPI(UsdPhysics.ArticulationRootAPI)} '
+        f'parent={chassis_prim.GetParent().GetPath()} '
+        f'parentRoot={chassis_prim.GetParent().HasAPI(UsdPhysics.ArticulationRootAPI)}',
+        flush=True,
+    )
+    for attr_name in (
+        'physxRigidBody:linearDamping',
+        'physxRigidBody:angularDamping',
+        'physxRigidBody:maxLinearVelocity',
+        'physxRigidBody:maxAngularVelocity',
+        'physxRigidBody:lockedPosAxis',
+        'physxRigidBody:lockedRotAxis',
+    ):
+        attr = chassis_prim.GetAttribute(attr_name)
+        if attr and attr.HasAuthoredValue():
+            print(f'[VEL] {attr_name}={attr.Get()}', flush=True)
+
+    cube = UsdGeom.Cube.Define(stage, '/World/FreeCube')
+    cube.CreateSizeAttr(0.2)
+    cube.AddTranslateOp().Set(Gf.Vec3d(5.0, 0.0, 3.0))
+    UsdPhysics.RigidBodyAPI.Apply(cube.GetPrim())
+    UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+    UsdPhysics.MassAPI.Apply(cube.GetPrim()).CreateMassAttr(1.0)
+    for _ in range(10):
+        app.update()
+    free = RigidPrim('/World/FreeCube')
+
+    com_api = UsdPhysics.MassAPI(chassis.prims[0]) if chassis.prims[0].HasAPI(UsdPhysics.MassAPI) else None
+    com_usd = np.array(com_api.GetCenterOfMassAttr().Get() or (0.0, 0.0, 0.0), dtype=np.float64)
+    com_pos, _com_quat = chassis.get_coms()
+    com_tensor = com_pos.numpy()[0].astype(np.float64)
+    print(f'[VEL] COM usd={com_usd.tolist()}  tensor={com_tensor.tolist()}', flush=True)
+    com_body = com_usd
+
+    def candidates(q, v, w):
+        v = np.asarray(v, dtype=np.float64)
+        w = np.asarray(w, dtype=np.float64)
+        r_world = np.asarray(quat_rotate(q, com_body), dtype=np.float64)
+        w_world = np.asarray(quat_rotate(q, w), dtype=np.float64)
+        return {
+            'as read': v,
+            'body->world': np.asarray(quat_rotate(q, v), dtype=np.float64),
+            'world->body': np.asarray(quat_rotate(quat_conj(q), v), dtype=np.float64),
+            'COM -> origin': v - np.cross(w, r_world),
+            'COM w as body': v - np.cross(w_world, r_world),
+        }
+
+    def sample(position, orientation, linear, angular, steps=25, body=chassis):
+        body.set_world_poses(
+            positions=np.array([position], dtype=np.float32),
+            orientations=np.array([orientation], dtype=np.float32),
+        )
+        body.set_velocities(
+            linear_velocities=np.array([linear], dtype=np.float32),
+            angular_velocities=np.array([angular], dtype=np.float32),
+        )
+        app.update()
+        pos, quat = body.get_world_poses()
+        prev_p = pos.numpy()[0].astype(np.float64)
+        prev_q = quat.numpy()[0].astype(np.float64)
+        prev_steps = SimulationManager.get_num_physics_steps()
+        prev_sim_time = SimulationManager.get_simulation_time()
+        timeline = omni.timeline.get_timeline_interface()
+        prev_timeline = timeline.get_current_time()
+        errors = {name: [] for name in ('as read', 'body->world', 'world->body', 'COM -> origin', 'COM w as body')}
+        one_step_errors = []
+        usd_errors = []
+        gyro_errors = []
+        reported = []
+        pose_rates = []
+        step_counts = []
+        displacements = []
+        sim_dts = []
+        timeline_dts = []
+        for i in range(steps):
+            app.update()
+            pos, quat = body.get_world_poses()
+            vel, ang = body.get_velocities()
+            p = pos.numpy()[0].astype(np.float64)
+            q = quat.numpy()[0].astype(np.float64)
+            v = vel.numpy()[0].astype(np.float64)
+            w = ang.numpy()[0].astype(np.float64)
+            now = SimulationManager.get_num_physics_steps()
+            sim_time = SimulationManager.get_simulation_time()
+            timeline_time = timeline.get_current_time()
+            sim_dts.append(sim_time - prev_sim_time)
+            timeline_dts.append(timeline_time - prev_timeline)
+            prev_sim_time = sim_time
+            prev_timeline = timeline_time
+            n_steps = max(1, now - prev_steps)
+            dt = n_steps * SIM_DT
+            v_pos = (p - prev_p) / dt
+            v_pos_one = (p - prev_p) / SIM_DT
+            q_delta = quat_mul(q, quat_conj(prev_q))
+            w_pose = np.asarray(_rotvec_from_quat(q_delta), dtype=np.float64) / SIM_DT
+            if i >= 5:
+                for name, cand in candidates(q, v, w).items():
+                    errors[name].append(float(np.linalg.norm(cand - v_pos_one)))
+                one_step_errors.append(v_pos_one.copy())
+                usd_v = body.prims[0].GetAttribute('physics:velocity').Get()
+                if usd_v is not None:
+                    usd_errors.append(np.array(usd_v, dtype=np.float64))
+                gyro_errors.append(w.copy())
+                pose_rates.append(w_pose.copy())
+                reported.append(v.copy())
+                step_counts.append(n_steps)
+                displacements.append((p - prev_p).copy())
+            prev_p, prev_q, prev_steps = p, q, now
+        mean_v = np.mean(reported, axis=0) if reported else np.zeros(3)
+        mean_pos = np.mean(one_step_errors, axis=0) if one_step_errors else np.zeros(3)
+        mean_steps = float(np.mean(step_counts)) if step_counts else 0.0
+        mean_sim = float(np.mean(sim_dts)) if sim_dts else 0.0
+        mean_timeline = float(np.mean(timeline_dts)) if timeline_dts else 0.0
+        print(
+            f'[VEL] steps/update={mean_steps:.2f}  sim_dt={mean_sim:.6f}  '
+            f'timeline_dt={mean_timeline:.6f}  velocity={mean_v.tolist()}  '
+            f'pose/dt={mean_pos.tolist()}',
+            flush=True,
+        )
+        for name, series in errors.items():
+            err = float(np.mean(series)) if series else float('nan')
+            print(f'[VEL] {name:16s} {err:7.3f} m/s', flush=True)
+        if usd_errors:
+            print(f'[VEL] usd attribute {np.mean(usd_errors, axis=0).tolist()}', flush=True)
+        if gyro_errors:
+            w_mean = np.mean(gyro_errors, axis=0)
+            pose_mean = np.mean(pose_rates, axis=0)
+            print(
+                f'[VEL] angular as read {w_mean.tolist()}  pose rate {pose_mean.tolist()}',
+                flush=True,
+            )
+
+    level = np.array(AUTHORED_QUAT_WXYZ, dtype=np.float64)
+    bank = quat_mul(
+        (math.cos(math.radians(30) / 2), 0.0, math.sin(math.radians(30) / 2), 0.0),
+        tuple(level),
+    )
+    bank = np.array(bank, dtype=np.float64)
+    cases = (
+        ('level, 1 m/s east', level, (1.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+        ('level, 1 m/s up', level, (0.0, 0.0, 1.0), (0.0, 0.0, 0.0)),
+        ('30 deg roll, 1 m/s east', bank, (1.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+        ('30 deg roll, 1 m/s up', bank, (0.0, 0.0, 1.0), (0.0, 0.0, 0.0)),
+        ('30 deg roll, 3 rad/s roll rate', bank, (0.0, 0.0, 0.0), (0.0, 3.0, 0.0)),
+    )
+    print('[VEL] free cube, 1 m/s east', flush=True)
+    sample((5.0, 0.0, 3.0), (1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 0.0), body=free)
+    print('[VEL] free cube, 3 rad/s about Y', flush=True)
+    sample((5.0, 0.0, 3.0), (1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 3.0, 0.0), body=free)
+    for name, orientation, linear, angular in cases:
+        print(f'[VEL] {name}', flush=True)
+        sample((0.0, 0.0, 3.0), orientation, linear, angular)
+
+    if scene is not None and saved_gravity is not None:
+        scene.CreateGravityMagnitudeAttr(saved_gravity)
+    print('[VEL] accelerometer at rest and at a held 90 deg roll', flush=True)
+    for name, angle in (('level', 0.0), ('roll 90', math.radians(90))):
+        q = np.array(AUTHORED_QUAT_WXYZ, dtype=np.float64)
+        if angle:
+            q = np.array(quat_mul(
+                (math.cos(angle / 2), 0.0, math.sin(angle / 2), 0.0),
+                tuple(q),
+            ), dtype=np.float64)
+        readings = []
+        for _ in range(20):
+            chassis.set_world_poses(
+                positions=np.array([[0.0, 0.0, 3.0]], dtype=np.float32),
+                orientations=np.array([q], dtype=np.float32),
+            )
+            chassis.set_velocities(
+                linear_velocities=np.zeros((1, 3), dtype=np.float32),
+                angular_velocities=np.zeros((1, 3), dtype=np.float32),
+            )
+            app.update()
+            raw = np.asarray(imu.get_data(read_gravity=True)['linear_acceleration'], dtype=np.float64).reshape(3)
+            _, quat = chassis.get_world_poses()
+            quat = quat.numpy()[0].astype(np.float64)
+            frd = np.asarray(mesh_body_to_frd(raw), dtype=np.float64)
+            expected = np.asarray(specific_force_frd(quat, (0.0, 0.0, 0.0)), dtype=np.float64)
+            readings.append((raw, frd, expected))
+        raw, frd, expected = np.mean([r[0] for r in readings[5:]], axis=0), np.mean([r[1] for r in readings[5:]], axis=0), np.mean([r[2] for r in readings[5:]], axis=0)
+        print(
+            f'[VEL] {name}: raw=({raw[0]:+.2f},{raw[1]:+.2f},{raw[2]:+.2f})  '
+            f'frd=({frd[0]:+.2f},{frd[1]:+.2f},{frd[2]:+.2f})  '
+            f'from pose=({expected[0]:+.2f},{expected[1]:+.2f},{expected[2]:+.2f})',
+            flush=True,
+        )
+    print('[VEL] check complete', flush=True)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Create the CLI argument parser for `ardupilot_bridge.py`."""
     parser = argparse.ArgumentParser(
@@ -420,6 +764,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         '--no-wait',
         action='store_true',
         help='Do not block waiting for the first ArduPilot servo packet before starting loop',
+    )
+    parser.add_argument(
+        '--vel-check',
+        action='store_true',
+        help='Compare PhysX velocity with the change in pose, then exit',
     )
     parser.add_argument(
         '--lidar',
@@ -475,7 +824,7 @@ def main() -> None:
     # --------------------------------------------------------
     # Load USD Scene
     # --------------------------------------------------------
-    scene_path = os.path.expanduser('~/go_aero/vehicle_scene.usd')
+    scene_path = os.path.expanduser('~/go_aero/assets/vehicle_scene.usd')
     print(f'[INFO] Opening vehicle scene: {scene_path}', flush=True)
     omni.usd.get_context().open_stage(scene_path)
 
@@ -541,7 +890,31 @@ def main() -> None:
     except Exception as exc:
         print(f'[WARN] Could not configure 250 Hz PhysX scene rate: {exc}', flush=True)
 
+    # The terrain sheet at the origin is about 0.34 m high. The chassis rests
+    # on the ground plane at 0.16 m, so a climb flies into that sheet.
+    terrain_prim = stage.GetPrimAtPath('/World/Terrain')
+    if terrain_prim.IsValid():
+        terrain_collision = UsdPhysics.CollisionAPI.Apply(terrain_prim)
+        terrain_collision.CreateCollisionEnabledAttr().Set(False)
+        print('[INFO] Terrain collision off; lockstep flight uses the ground plane', flush=True)
+
+    from pxr import Usd
+    owner_target = Sdf.Path('/World/PhysicsScene')
+    for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
+        path = str(prim.GetPath())
+        is_body = prim.HasAPI(UsdPhysics.RigidBodyAPI) or prim.HasAPI(UsdPhysics.CollisionAPI)
+        is_ground = 'Ground' in path or 'Collision' in path
+        if prim.IsInstanceProxy() or not (is_body or is_ground):
+            continue
+        prim.CreateRelationship('physics:simulationOwner', custom=False).SetTargets([owner_target])
+    print('[INFO] Chassis and ground plane owned by /World/PhysicsScene', flush=True)
     timeline = omni.timeline.get_timeline_interface()
+    timeline.set_time_codes_per_second(SENSOR_RATE)
+    from omni.kit.loop import _loop as omni_loop
+    loop_runner = omni_loop.acquire_loop_interface()
+    loop_runner.set_manual_step_size(SIM_DT)
+    loop_runner.set_manual_mode(True)
+    print(f'[INFO] Loop step {SIM_DT:.4f} s', flush=True)
     timeline.play()
 
     # Under Isaac Lab 3's launcher, playing the timeline does not create the
@@ -551,6 +924,23 @@ def main() -> None:
 
     for _ in range(30):
         app.update()
+
+    from pxr import PhysxSchema as _PhysxSchema
+    scene_rates = []
+    for prim in stage.Traverse():
+        if prim.GetTypeName() == 'PhysicsScene' and prim.HasAPI(_PhysxSchema.PhysxSceneAPI):
+            rate = _PhysxSchema.PhysxSceneAPI(prim).GetTimeStepsPerSecondAttr().Get()
+            scene_rates.append(f'{prim.GetPath()}={rate}')
+    print(
+        f'[INFO] SimulationManager dt={SimulationManager.get_physics_dt():.4f}  '
+        f'scenes={", ".join(scene_rates)}',
+        flush=True,
+    )
+
+    if args.vel_check:
+        run_velocity_check(chassis, imu, app, stage)
+        simulation_app.close()
+        return
 
     # Record initial spawn position so ArduPilot NED origin (0, 0, 0) corresponds
     # to the vehicle sitting on the ground / spawn point.
@@ -848,12 +1238,33 @@ def main() -> None:
 
         print(f'[INFO] ArduPilot SITL connected from {peer_addr}. Bridge running.', flush=True)
 
-    # Re-sample resting pose after any pre-connection settling ticks so NED down=0
-    # matches the actual resting height when lockstep starts.
+    # The authored pose is level, nose north. Releasing the vehicle from 1.5 m
+    # drops it onto the terrain before any JSON state is sent, and it comes to
+    # rest yawed about 73 deg. Put it on its gear in the authored orientation
+    # now, so the first state the EKF sees is that pose. 0.16 m is the chassis
+    # origin height once the gear is on the ground.
+    REST_Z = 0.16
+    chassis.set_world_poses(
+        positions=np.array([[0.0, 0.0, REST_Z]], dtype=np.float32),
+        orientations=np.array([list(AUTHORED_QUAT_WXYZ)], dtype=np.float32),
+    )
+    chassis.set_velocities(
+        linear_velocities=np.zeros((1, 3), dtype=np.float32),
+        angular_velocities=np.zeros((1, 3), dtype=np.float32),
+    )
+    app.update()
     pos_w, quat_w = chassis.get_world_poses()
     pos_w = pos_w.numpy()[0].astype(np.float64)
     quat_w = quat_w.numpy()[0].astype(np.float64)
     spawn_z = float(pos_w[2])
+    rest_rpy = enu_quat_to_ned_euler(quat_w)
+    print(
+        f'[INFO] Lockstep pose z={spawn_z:+.2f}m  '
+        f'rpy_deg=({math.degrees(rest_rpy[0]):+.1f},'
+        f'{math.degrees(rest_rpy[1]):+.1f},'
+        f'{math.degrees(rest_rpy[2]):+.1f})',
+        flush=True,
+    )
 
     def noise_vec3(std: float) -> np.ndarray:
         return np.zeros(3) if args.no_noise else np.random.normal(0.0, std, size=3)
@@ -862,6 +1273,17 @@ def main() -> None:
     # monotonically by SIM_DT = 1.0 / SENSOR_RATE on each PhysX step.
     step = 0
     sim_time = 0.0
+    prev_quat_w = None
+    prev_lin_vel_w = None
+    com_pos, _com_quat = chassis.get_coms()
+    com_body = com_pos.numpy()[0].astype(np.float64)
+    vel_warns = 0
+    vel_err_com_max = 0.0
+    vel_err_origin_max = 0.0
+    vz_lp = 0.0
+    vxy_lp = np.zeros(2, dtype=np.float64)
+    lin_acc_lp = np.zeros(3, dtype=np.float64)
+    gyro_lp = np.zeros(3, dtype=np.float64)
     _render_period_steps = max(1, int(round(SENSOR_RATE / max(args.render_hz, 1.0))))
 
     def recv_one_packet(timeout: float) -> ServoPacket | None:
@@ -910,11 +1332,13 @@ def main() -> None:
             # --------------------------------------------------
             F_body, M_body = compute_motor_forces_and_torques(cmds, motor_map=args.motor_map)
 
-            for i, name in enumerate(prop_order):
-                omega = cmds[i] * 1500.0 * PROP_LAYOUT[name][spin_key]
+            # Leave the prop joints at zero. Their velocity drives saturate at
+            # 100 Nm trying to reach cmd*1500 rad/s, and that constraint torque
+            # swamps the roll/pitch moment from the thrust model.
+            for name in prop_order:
                 drive = prop_drives.get(name)
                 if drive:
-                    drive.GetTargetVelocityAttr().Set(float(omega))
+                    drive.GetTargetVelocityAttr().Set(0.0)
 
             F_world = quat_rotate(quat_w, F_body)
             M_world = quat_rotate(quat_w, M_body)
@@ -929,6 +1353,7 @@ def main() -> None:
             # --------------------------------------------------
             # 3. Step PhysX by SIM_DT and advance sim_time
             # --------------------------------------------------
+            pos_before = pos_w.copy()
             simulation_app.update()
             step += 1
             sim_time = step * SIM_DT
@@ -939,15 +1364,54 @@ def main() -> None:
             pos_w, quat_w = chassis.get_world_poses()  # ENU world, quat (w, x, y, z)
             pos_w = pos_w.numpy()[0].astype(np.float64)
             quat_w = quat_w.numpy()[0].astype(np.float64)
-            lin_vel_w, _ = chassis.get_velocities()
-            lin_vel_w = lin_vel_w.numpy()[0].astype(np.float64)
+            # Horizontal velocity is this step's pose change. Vertical velocity
+            # stays the rigid-body vz, which tracks altitude.
+            phys_vel, ang_vel_w = chassis.get_velocities()
+            phys_vel = phys_vel.numpy()[0].astype(np.float64)
+            ang_vel_w = ang_vel_w.numpy()[0].astype(np.float64)
+            v_pose = (pos_w - pos_before) / SIM_DT
+            r_world = np.asarray(quat_rotate(quat_w, com_body), dtype=np.float64)
+            v_origin = phys_vel - np.cross(ang_vel_w, r_world)
+            err_com = float(np.linalg.norm(v_pose - phys_vel))
+            err_origin = float(np.linalg.norm(v_pose - v_origin))
+            vel_err_com_max = max(vel_err_com_max, err_com)
+            vel_err_origin_max = max(vel_err_origin_max, err_origin)
+            if min(err_com, err_origin) > 0.2:
+                vel_warns += 1
+                if vel_warns <= 5:
+                    print(
+                        f'[WARN] |dp/dt - v| com={err_com:.2f} origin={err_origin:.2f} '
+                        f'm/s at t={sim_time:.2f}',
+                        flush=True,
+                    )
+            vxy_lp += (SIM_DT / (VXY_TAU_S + SIM_DT)) * (v_pose[:2] - vxy_lp)
+            vz_lp += (SIM_DT / (VZ_TAU_S + SIM_DT)) * (float(phys_vel[2]) - vz_lp)
+            lin_vel_w = np.array([vxy_lp[0], vxy_lp[1], vz_lp], dtype=np.float64)
+            if prev_lin_vel_w is None:
+                lin_acc_w = np.zeros(3, dtype=np.float64)
+            else:
+                lin_acc_w = np.clip((lin_vel_w - prev_lin_vel_w) / SIM_DT, -15.0, 15.0)
+            prev_lin_vel_w = lin_vel_w.copy()
+            lin_acc_lp += (SIM_DT / (LIN_ACC_TAU_S + SIM_DT)) * (lin_acc_w - lin_acc_lp)
 
-            imu_frame = imu.get_data(read_gravity=True)
-            lin_acc_mesh = np.asarray(imu_frame['linear_acceleration'], dtype=np.float64).reshape(3)
-            ang_vel_mesh = np.asarray(imu_frame['angular_velocity'], dtype=np.float64).reshape(3)
+            # Gyro is the derivative of the same quaternion we send as attitude.
+            # Specific force uses that quaternion and the rigid-body acceleration.
+            # The Isaac IMU accelerometer does not rotate with the chassis.
+            if prev_quat_w is None:
+                omega_world = np.zeros(3, dtype=np.float64)
+            else:
+                q_delta = quat_mul(quat_w, quat_conj(prev_quat_w))
+                omega_world = np.asarray(_rotvec_from_quat(q_delta), dtype=np.float64) / SIM_DT
+                # A missed pose read is a ~180 deg step. Hold the last good rate.
+                if float(np.dot(omega_world, omega_world)) > 64.0:
+                    omega_world = gyro_lp
+            prev_quat_w = quat_w.copy()
+            gyro_lp = np.array(omega_world, dtype=np.float64, copy=True)
 
-            accel_frd = mesh_body_to_frd(lin_acc_mesh) + noise_vec3(ACC_NOISE_STD)
-            gyro_frd = mesh_body_to_frd(ang_vel_mesh) + noise_vec3(GYRO_NOISE_STD)
+            accel_frd = np.asarray(specific_force_frd(quat_w, lin_acc_lp), dtype=np.float64)
+            accel_frd = accel_frd + noise_vec3(ACC_NOISE_STD)
+            gyro_frd = np.asarray(world_vector_to_frd(quat_w, gyro_lp), dtype=np.float64)
+            gyro_frd = gyro_frd + noise_vec3(GYRO_NOISE_STD)
 
             # Relative to spawn height so NED down=0 when resting on ground
             pos_rel_enu = np.array([pos_w[0], pos_w[1], pos_w[2] - spawn_z], dtype=np.float64)
@@ -995,9 +1459,13 @@ def main() -> None:
                     f'{math.degrees(euler_ned[1]):+.1f},'
                     f'{math.degrees(euler_ned[2]):+.1f})  '
                     f'armed={is_armed}  motors=[{cmds[0]:.2f},{cmds[1]:.2f},'
-                    f'{cmds[2]:.2f},{cmds[3]:.2f}] avg={avg:.2f}',
+                    f'{cmds[2]:.2f},{cmds[3]:.2f}] avg={avg:.2f}  '
+                    f'dv_com={vel_err_com_max:.2f} dv_origin={vel_err_origin_max:.2f} '
+                    f'warns={vel_warns}',
                     flush=True,
                 )
+                vel_err_com_max = 0.0
+                vel_err_origin_max = 0.0
 
     except KeyboardInterrupt:
         print('[INFO] SIGINT received, stopping...', flush=True)
