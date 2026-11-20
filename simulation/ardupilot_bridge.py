@@ -57,9 +57,14 @@ except ImportError:  # pragma: no cover - fallback for bare system python withou
 # Mount paths authored by build_scene.py. Kept here so the optional ZED and
 # ROS 2 paths do not depend on simulation/_compat.py.
 LIDAR_MOUNT_PATH = '/World/Vehicle/chassis/lidar_mount'
-LIDAR_SENSOR_PATH = '/World/Vehicle/chassis/lidar_mount/lidar_sensor'
+# RTX traces this prim's authored xform. A child of the chassis keeps the
+# spawn xform while PhysX moves the body, so the sensor is posed in world
+# from the chassis pose each step.
+LIDAR_SENSOR_PATH = '/World/LidarSensor'
 LIDAR_MOUNT_POS_MESH = (0.468, -0.04, -0.515)
-LIDAR_MOUNT_ROT_X_DEG = 180.0
+# RTX lidar forward is +X. RotateZ(-90) maps +X onto mesh -Y, which the
+# vehicle RotateX(90) carries to world down.
+LIDAR_MOUNT_ROT_Z_DEG = -90.0
 ZED1_MOUNT_PATH = '/World/Vehicle/chassis/zed1_mount'
 ZED2_MOUNT_PATH = '/World/Vehicle/chassis/zed2_mount'
 ZED1_MOUNT_POS_MESH = (0.0, -0.127, -0.1524)
@@ -90,6 +95,34 @@ def ensure_xform_pose(stage, prim_path: str, translate_xyz: Sequence[float], rot
     xform.AddTranslateOp().Set(Gf.Vec3d(float(translate_xyz[0]), float(translate_xyz[1]), float(translate_xyz[2])))
     if rotate_x_deg is not None:
         xform.AddRotateXOp().Set(float(rotate_x_deg))
+    return xform
+
+
+def aim_lidar_mount(stage):
+    """Place the lidar under the front-right arm and point +X at the ground.
+
+    Translate is authored first so the offset stays in the mesh frame.
+    The rotate that follows turns the sensor axes only.
+    """
+    from pxr import Gf, UsdGeom
+
+    xform = UsdGeom.Xform.Define(stage, LIDAR_MOUNT_PATH)
+    prim = xform.GetPrim()
+    xform.ClearXformOpOrder()
+    for prop_name in (
+        'xformOp:translate',
+        'xformOp:rotateX',
+        'xformOp:rotateY',
+        'xformOp:rotateZ',
+    ):
+        if prim.HasAttribute(prop_name):
+            prim.RemoveProperty(prop_name)
+    # Translate first. A later rotate then turns the axes only; authoring
+    # the rotate first also swings this offset into the propeller.
+    xform.AddTranslateOp().Set(
+        Gf.Vec3d(float(LIDAR_MOUNT_POS_MESH[0]), float(LIDAR_MOUNT_POS_MESH[1]), float(LIDAR_MOUNT_POS_MESH[2]))
+    )
+    xform.AddRotateZOp().Set(float(LIDAR_MOUNT_ROT_Z_DEG))
     return xform
 
 
@@ -953,22 +986,92 @@ def main() -> None:
     # Optional RTX LiDAR sensor (--lidar flag)
     # --------------------------------------------------------
     lidar_sensor = None
-    LIDAR_READ_INTERVAL = 25  # ~10 Hz at 250 Hz physics
+    # Example_Rotary's preset near range is 1 m, so the ground under the
+    # gear (about 0.12 m below the sensor) is discarded and the closest
+    # reported return is the near range itself.
+    LIDAR_NEAR_M = 0.05
+    LIDAR_FAR_M = 200.0
+    last_lidar_scan = None
 
-    def lidar_ranges():
-        """Return per-return ranges (m) from the latest LiDAR scan, or None."""
+    def lidar_scan():
+        """Return (point count, downward range in m), or None if the buffer is empty.
+
+        generic-model-output is empty on most steps and only holds a cloud
+        for the step that publishes it, so the caller reads every step.
+        Missed beams are range 0. The downward range is the sensor height
+        above the plane.
+        """
         data, _ = lidar_sensor.get_data('generic-model-output')
         if data is None:
             return None
         gmo = parse_generic_model_output_data(data)
-        if gmo.numElements == 0:
+        count = int(gmo.numElements)
+        if count <= 0:
             return None
-        if gmo.elementsCoordsType == generic_model_output.CoordsType.SPHERICAL:
-            return np.asarray(gmo.z, dtype=np.float64)
-        return np.linalg.norm(
-            np.stack([np.asarray(gmo.x), np.asarray(gmo.y), np.asarray(gmo.z)], axis=1),
-            axis=1,
+        spherical = gmo.elementsCoordsType == generic_model_output.CoordsType.SPHERICAL
+        if spherical:
+            azimuth = np.asarray(gmo.x, dtype=np.float64)[:count]
+            elevation = np.asarray(gmo.y, dtype=np.float64)[:count]
+            ranges = np.asarray(gmo.z, dtype=np.float64)[:count]
+        else:
+            points = np.stack(
+                [
+                    np.asarray(gmo.x, dtype=np.float64)[:count],
+                    np.asarray(gmo.y, dtype=np.float64)[:count],
+                    np.asarray(gmo.z, dtype=np.float64)[:count],
+                ],
+                axis=1,
+            )
+            ranges = np.linalg.norm(points, axis=1)
+            azimuth = np.arctan2(points[:, 1], points[:, 0])
+            elevation = np.arcsin(np.clip(points[:, 2] / np.maximum(ranges, 1e-9), -1.0, 1.0))
+        valid = np.isfinite(ranges) & (ranges >= LIDAR_NEAR_M) & (ranges <= LIDAR_FAR_M)
+        if not np.any(valid):
+            return None
+        # +X points at the ground. A beam at `angle` degrees from +X that
+        # hits the plane has range * cos(angle) equal to the sensor height.
+        # The shortest return is often the airframe, and straight-down hits
+        # inside about 0.3 m never come back, so the altitude is the most
+        # downward beam that did return.
+        angle = np.hypot(azimuth, elevation)
+        down_i = int(np.argmin(np.where(valid, angle, np.inf)))
+        down_m = float(ranges[down_i]) * math.cos(math.radians(float(angle[down_i])))
+        return int(np.count_nonzero(valid)), down_m
+
+    lidar_xform_op = None
+
+    def place_lidar(pos, quat_wxyz):
+        """Write the chassis pose into the lidar prim RTX actually traces."""
+        nonlocal lidar_xform_op
+        if lidar_sensor is None:
+            return
+        from pxr import Gf, UsdGeom
+        w, x, y, z = (float(v) for v in quat_wxyz)
+        chassis_m = Gf.Matrix4d()
+        chassis_m.SetRotate(Gf.Quatd(w, Gf.Vec3d(x, y, z)))
+        chassis_m.SetTranslateOnly(Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2])))
+        mount_m = Gf.Matrix4d()
+        mount_m.SetRotate(Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), float(LIDAR_MOUNT_ROT_Z_DEG)))
+        mount_m.SetTranslateOnly(
+            Gf.Vec3d(float(LIDAR_MOUNT_POS_MESH[0]), float(LIDAR_MOUNT_POS_MESH[1]), float(LIDAR_MOUNT_POS_MESH[2]))
         )
+        # Gf matrices multiply row vectors, so mount applies before chassis.
+        world = mount_m * chassis_m
+        if lidar_xform_op is None:
+            prim = stage.GetPrimAtPath(LIDAR_SENSOR_PATH)
+            xf = UsdGeom.Xformable(prim)
+            xf.ClearXformOpOrder()
+            for prop_name in (
+                'xformOp:translate',
+                'xformOp:orient',
+                'xformOp:rotateXYZ',
+                'xformOp:rotateZ',
+                'xformOp:transform',
+            ):
+                if prim.HasAttribute(prop_name):
+                    prim.RemoveProperty(prop_name)
+            lidar_xform_op = xf.AddTransformOp()
+        lidar_xform_op.Set(world)
 
     if args.lidar:
         if not ext_manager.set_extension_enabled_immediate('isaacsim.sensors.experimental.rtx', True):
@@ -977,13 +1080,14 @@ def main() -> None:
             Lidar, LidarSensor, generic_model_output, parse_generic_model_output_data,
         )
 
-        if not stage.GetPrimAtPath(LIDAR_MOUNT_PATH).IsValid():
-            print(
-                f'[WARN] {LIDAR_MOUNT_PATH} not found in USD; '
-                f'creating it at {LIDAR_MOUNT_POS_MESH}...',
-                flush=True,
-            )
-            ensure_xform_pose(stage, LIDAR_MOUNT_PATH, LIDAR_MOUNT_POS_MESH, rotate_x_deg=LIDAR_MOUNT_ROT_X_DEG)
+        aim_lidar_mount(stage)
+        # The heightfield is centered above the parked gear (about 0.3 m at
+        # the origin). Downward ranges then hit that sheet instead of the
+        # ground plane the altitude is measured from.
+        terrain = stage.GetPrimAtPath('/World/Terrain')
+        if terrain.IsValid():
+            terrain.SetActive(False)
+            print('[LIDAR] hid /World/Terrain; ranges use the ground plane', flush=True)
 
         lidar_sensor = LidarSensor(
             Lidar.create(
@@ -991,21 +1095,44 @@ def main() -> None:
                 config='Example_Rotary',
                 translations=[[0.0, 0.0, 0.0]],
                 orientations=[[1.0, 0.0, 0.0, 0.0]],
+                attributes={'omni:sensor:Core:nearRangeM': LIDAR_NEAR_M},
             ),
             annotators=['generic-model-output'],
         )
-        first_ranges = None
+        for prim in stage.Traverse():
+            if not str(prim.GetPath()).startswith(LIDAR_SENSOR_PATH):
+                continue
+            near_attr = prim.GetAttribute('omni:sensor:Core:nearRangeM')
+            if near_attr.IsValid():
+                near_attr.Set(LIDAR_NEAR_M)
+                print(
+                    f'[LIDAR] near range {near_attr.Get()} m on {prim.GetPath()}',
+                    flush=True,
+                )
+            place_lidar(pos_w, quat_w)
+        from pxr import Gf
+        sensor_xf = UsdGeom.Xformable(stage.GetPrimAtPath(LIDAR_SENSOR_PATH))
+        sensor_world = sensor_xf.ComputeLocalToWorldTransform(0)
+        sensor_origin = sensor_world.ExtractTranslation()
+        sensor_fwd = sensor_world.TransformDir(Gf.Vec3d(1.0, 0.0, 0.0))
+        print(
+            f'[LIDAR] sensor xyz=({sensor_origin[0]:+.3f},{sensor_origin[1]:+.3f},'
+            f'{sensor_origin[2]:+.3f})  '
+            f'+X=({sensor_fwd[0]:+.2f},{sensor_fwd[1]:+.2f},{sensor_fwd[2]:+.2f})',
+            flush=True,
+        )
+        first_scan = None
         for _ in range(300):
             app.update()
-            first_ranges = lidar_ranges()
-            if first_ranges is not None:
+            first_scan = lidar_scan()
+            if first_scan is not None:
                 break
-        if first_ranges is None:
+        if first_scan is None:
             print('[WARN] RTX LiDAR returned no points during warm-up', flush=True)
         else:
+            n_pts, down_m = first_scan
             print(
-                f'[LIDAR] first scan: points={first_ranges.size}  '
-                f'min_dist={float(np.min(first_ranges)):.2f}m',
+                f'[LIDAR] first scan: points={n_pts}  down={down_m:.2f}m',
                 flush=True,
             )
         print(f'[INFO] RTX LiDAR attached at {LIDAR_SENSOR_PATH}', flush=True)
@@ -1350,6 +1477,9 @@ def main() -> None:
                 local_frame=False,
             )
 
+            # The lidar prim does not follow the PhysX pose on its own.
+            place_lidar(pos_w, quat_w)
+
             # --------------------------------------------------
             # 3. Step PhysX by SIM_DT and advance sim_time
             # --------------------------------------------------
@@ -1439,17 +1569,24 @@ def main() -> None:
             # --------------------------------------------------
             # Optional LiDAR & status log
             # --------------------------------------------------
-            if lidar_sensor is not None and step % LIDAR_READ_INTERVAL == 0:
+            if lidar_sensor is not None:
                 try:
-                    ranges = lidar_ranges()
-                    if ranges is not None and ranges.size > 0 and step % (SENSOR_RATE * 2) == 0:
-                        print(
-                            f'[LIDAR] points={ranges.size}  min_dist={float(np.min(ranges)):.2f}m',
-                            flush=True,
-                        )
+                    scan = lidar_scan()
+                    if scan is not None:
+                        last_lidar_scan = scan
                 except Exception as exc:
                     if step % (SENSOR_RATE * 2) == 0:
                         print(f'[LIDAR] read error: {exc}', flush=True)
+                if step % (SENSOR_RATE * 2) == 0:
+                    if last_lidar_scan is None:
+                        print('[LIDAR] no scan yet', flush=True)
+                    else:
+                        n_pts, down_m = last_lidar_scan
+                        print(
+                            f'[LIDAR] points={n_pts}  down={down_m:.2f}m  '
+                            f'z={pos_w[2]:+.2f}m',
+                            flush=True,
+                        )
 
             if step % (SENSOR_RATE * 2) == 0:
                 avg = sum(cmds) / 4.0

@@ -239,13 +239,13 @@ for name, info in props.items():
 # (prop_fr is at X=0.468, Z=-0.515) and 4 cm below the chassis origin.
 # Mesh -Y is down before the vehicle's RotateX(90), so that 4 cm keeps
 # a downward range on flat ground within 5 cm of hover altitude.
-# RotateX(180) aims the sensor's local +Z at the ground, the default
-# ray direction for Isaac Sim RTX LiDAR. The sensor prim is created
-# at runtime by px4_bridge.py or the tutorial script.
+# RTX lidar forward is local +X. RotateZ(-90) maps +X onto mesh -Y.
+# Translate is authored first so the rotate does not move the offset.
+# The sensor prim is created at runtime by the bridge or the tutorial.
 # ============================================================
 lidar_mount = UsdGeom.Xform.Define(stage, '/World/Vehicle/chassis/lidar_mount')
 lidar_mount.AddTranslateOp().Set(Gf.Vec3d(0.468, -0.04, -0.515))
-lidar_mount.AddRotateXOp().Set(180.0)
+lidar_mount.AddRotateZOp().Set(-90.0)
 print('[BUILD] Added lidar_mount under chassis')
 
 print('[BUILD] Physics setup complete.')
