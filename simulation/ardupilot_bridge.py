@@ -1132,7 +1132,7 @@ def main() -> None:
                     flush=True,
                 )
             place_lidar(pos_w, quat_w)
-        from pxr import Gf
+        from pxr import Gf, UsdGeom
         sensor_xf = UsdGeom.Xformable(stage.GetPrimAtPath(LIDAR_SENSOR_PATH))
         sensor_world = sensor_xf.ComputeLocalToWorldTransform(0)
         sensor_origin = sensor_world.ExtractTranslation()
