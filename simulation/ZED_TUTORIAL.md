@@ -16,7 +16,7 @@ SDK, or to `zed-ros2-wrapper` with `sim_mode:=true`.
 | ZED SDK / pyzed | 5.5.1 / 5.5 |
 | CUDA toolkit installed for the SDK | 13.5.0 |
 | Driver | 595.91.07 |
-| `zed-ros2-wrapper` | not installed on this machine |
+| `zed-ros2-wrapper` | v5.5.0 (`stereolabs/zed-ros2-wrapper` `431dcf4b1ea39caf894ca6ea294437437dbdb034`) |
 
 `sl.sensor.camera` 5.3.1 lists Kit 110.1.2 and 110.3.0. Passing `--enable` at
 Kit startup makes the 110.4 dependency solver reject it. The scripts register
@@ -126,9 +126,44 @@ along world +Y from y=0.160 m, level with the ground, so the boards at 3,
 5, and 10 m are 2.840, 4.840, and 9.840 m away. One headless run with the
 level mount measured 2.800 m (1.39%), 4.817 m (0.47%), and 9.840 m (0.00%).
 
+## ROS image, depth, and cloud
+
+The wrapper is built in `~/ros2_ws` from tag `v5.5.0`, commit `431dcf4`.
+Source Jazzy, then the workspace. Leave the Isaac shell unsourced. The
+wrapper process needs `LC_ALL=C` and
+`LD_LIBRARY_PATH=/usr/local/zed/lib:/usr/local/cuda/lib64`.
+
+With the tutorial publishing `/clock` and the stream on port 30000:
+
+```bash
+ros2 launch zed_wrapper zed_camera.launch.py \
+  camera_model:=zedx camera_name:=zed1 \
+  sim_mode:=true use_sim_time:=true sim_port:=30000 \
+  enable_ipc:=false publish_tf:=false publish_map_tf:=false \
+  'param_overrides:=general.grab_resolution:=SVGA;general.grab_frame_rate:=15;general.pub_frame_rate:=15.0;depth.point_cloud_freq:=15.0;depth.depth_stabilization:=0;pos_tracking.pos_tracking_enabled:=false'
+```
+
+`RMW_IMPLEMENTATION=rmw_fastrtps_cpp` on both sides. The wrapper's default
+point-cloud rate is 10 Hz, so `depth.point_cloud_freq` is set to 15. Depth
+stabilization stays at 0 so this simulated camera, which has no IMU, does
+not force positional tracking. Leave `debug.use_pub_timestamps` false: the
+grab stamp is already sim time from `/clock`, and turning that flag on makes
+the depth image use the host clock.
+
+Topics, one headless run, depth mode `NEURAL_LIGHT`:
+
+| Topic | Size | Wall rate | Stamp interval | Stamp vs `/clock` |
+|---|---|---|---|---|
+| `/zed1/zed_node/rgb/color/rect/image` | 960×600 | 12.5 Hz | 66.7 ms | 0.03 s |
+| `/zed1/zed_node/depth/depth_registered` | 960×600 | 12.7 Hz | 66.7 ms | 0.03 s |
+| `/zed1/zed_node/point_cloud/cloud_registered` | 448×256 | 12.3 Hz | 66.7 ms | 0.03 s |
+
+The 66.7 ms stamp interval is 15 Hz of sim time, and the stamps stay on
+`/clock`. The headless tutorial advanced sim time at 0.91× wall time on
+this machine, so the same messages arrive at about 12.5 Hz of wall time.
+
 ## Still to measure
 
 - Unmodified `visual-obstacle-detection` seeing an obstacle 5 m ahead. That repo is not on this machine.
-- ROS image, depth, and point-cloud topics stamped from `/clock`. The wrapper is not installed, so those topics are not published. `/clock` itself is sim time, about 30 Hz. The ZED image timestamps are host time at 66.7 ms (15 Hz). A consumer that also retrieved neural depth and the XYZ cloud kept up at 12.6 Hz.
 
 One headless `ardupilot_bridge.py --zed` plus `ardu_poshold.py --mode guided --altitude 5 --hold 30` armed after `EKF3 IMU0 is using GPS`, climbed to 4.64 m, held between 4.82 m and 4.99 m, landed, and disarmed. No lockstep stall and no EKF failsafe. From the first lockstep status to disarm the bridge advanced about 78 s of sim time in 615 s of wall time, 0.12× realtime (about 30 of the 250 Hz physics steps per wall second). The 30 s hold is wall time, so the hover was about 4 s of sim time.
