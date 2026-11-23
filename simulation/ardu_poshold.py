@@ -255,7 +255,7 @@ def wait_for_ekf_gps(mav: Any, timeout: float = 45.0) -> None:
     print('[WARN] Proceeding after EKF wait timeout; attempting arm anyway.', flush=True)
 
 
-def arm_and_takeoff(mav: Any, mavutil_mod: Any, target_alt_m: float, timeout: float = 45.0) -> None:
+def arm_and_takeoff(mav: Any, mavutil_mod: Any, target_alt_m: float, timeout: float = 180.0) -> None:
     """Arm ArduCopter in GUIDED mode and climb to `target_alt_m`."""
     set_copter_mode(mav, mavutil_mod, 'GUIDED')
 
@@ -632,7 +632,7 @@ def run_guided_forward_obstacle_phase(
     return result
 
 
-def land_and_disarm(mav: Any, mavutil_mod: Any, timeout: float = 45.0) -> None:
+def land_and_disarm(mav: Any, mavutil_mod: Any, timeout: float = 240.0) -> None:
     """Switch to LAND mode, clear RC overrides, wait for touchdown/disarm, and disarm cleanly."""
     set_copter_mode(mav, mavutil_mod, 'LAND')
     send_rc_override(mav, 0, 0, 0, 0)

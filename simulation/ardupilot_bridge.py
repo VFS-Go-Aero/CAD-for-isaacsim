@@ -49,6 +49,15 @@ import struct
 import sys
 from typing import Sequence
 
+from zed_setup import (
+    ZED1_MOUNT_PATH,
+    ZED1_STREAM_PORT,
+    add_textured_obstacles,
+    append_kit_args,
+    attach_zed_streams,
+    resolve_zed_ext_folder,
+)
+
 try:
     import numpy as np
 except ImportError:  # pragma: no cover - fallback for bare system python without numpy
@@ -65,12 +74,9 @@ LIDAR_MOUNT_POS_MESH = (0.468, -0.04, -0.515)
 # RTX lidar forward is +X. RotateZ(-90) maps +X onto mesh -Y, which the
 # vehicle RotateX(90) carries to world down.
 LIDAR_MOUNT_ROT_Z_DEG = -90.0
-ZED1_MOUNT_PATH = '/World/Vehicle/chassis/zed1_mount'
-ZED2_MOUNT_PATH = '/World/Vehicle/chassis/zed2_mount'
-ZED1_MOUNT_POS_MESH = (0.0, -0.127, -0.1524)
-ZED2_MOUNT_POS_MESH = (0.0, -0.127, -0.1524)
+
+# Frame id the zed-ros2-wrapper publishes once it opens the stream.
 ZED1_OPTICAL_FRAME_ID = 'zed1_camera_optical_frame'
-ZED2_OPTICAL_FRAME_ID = 'zed2_camera_optical_frame'
 
 
 def enable_required_extensions(ext_manager, names: Sequence[str]) -> list[str]:
@@ -811,12 +817,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--zed',
         action='store_true',
-        help='Attach simulated ZED stereo/depth cameras on zed1_mount and zed2_mount',
+        help='Stream one ZED X from the nose mount over IPC (port 30000)',
+    )
+    parser.add_argument(
+        '--zed-ext',
+        default=None,
+        help='Built stereolabs/zed-isaac-sim exts folder (or set ZED_ISAAC_SIM_EXTS)',
+    )
+    parser.add_argument(
+        '--obstacles',
+        action='store_true',
+        help='Add checkerboard boards 3, 5, and 10 m ahead of the nose',
     )
     parser.add_argument(
         '--ros2',
         action='store_true',
-        help='Enable isaacsim.ros2.bridge and publish /clock, /tf, /tf_static, and sensor point clouds',
+        help='Enable isaacsim.ros2.bridge and publish /clock, /tf, /tf_static, and the LiDAR cloud',
     )
     return parser
 
@@ -837,10 +853,14 @@ def main() -> None:
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
 
-    # RTX LiDAR, ZED depth cameras, and ROS 2 camera/LiDAR publishers require the
-    # rendering pipeline even when running with --headless.
-    if args.lidar or args.zed or args.ros2:
+    # RTX LiDAR, the ZED stream, and ROS 2 publishers need the rendering
+    # pipeline even when running with --headless.
+    if args.lidar or args.zed or args.ros2 or args.obstacles:
         args.enable_cameras = True
+    zed_ext_folder = None
+    if args.zed:
+        zed_ext_folder = resolve_zed_ext_folder(args.zed_ext)
+        append_kit_args(args, zed_ext_folder)
 
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app
@@ -848,7 +868,7 @@ def main() -> None:
     import omni.kit.app
     import omni.timeline
     import omni.usd
-    from pxr import Gf, Sdf, UsdGeom, UsdPhysics
+    from pxr import Gf, Sdf, UsdPhysics
 
     import _frames  # noqa: F401
 
@@ -868,6 +888,8 @@ def main() -> None:
             break
 
     stage = omni.usd.get_context().get_stage()
+    if args.obstacles:
+        add_textured_obstacles(stage)
 
     # Guard ViewportCameraState when running with --headless
     if not getattr(args, 'headless', False):
@@ -1138,53 +1160,15 @@ def main() -> None:
         print(f'[INFO] RTX LiDAR attached at {LIDAR_SENSOR_PATH}', flush=True)
 
     # --------------------------------------------------------
-    # Optional ZED stereo/depth cameras (--zed flag)
+    # Optional ZED X streams (--zed flag)
     # --------------------------------------------------------
-    zed_render_products = {}
-
     if args.zed:
-        import omni.replicator.core as rep
-
-        ext_manager = omni.kit.app.get_app().get_extension_manager()
-        zed_enabled_list = enable_required_extensions(ext_manager, ['sl.sensor.camera'])
-        zed_ext_enabled = bool(zed_enabled_list)
-
-        zed1_mount_path = ZED1_MOUNT_PATH
-        ensure_xform_pose(
-            stage,
-            zed1_mount_path,
-            ZED1_MOUNT_POS_MESH,
-            rotate_x_deg=None,
-            Gf_module=Gf,
-            UsdGeom_module=UsdGeom,
-        )
-
-        zed2_mount_path = ZED2_MOUNT_PATH
-        ensure_xform_pose(
-            stage,
-            zed2_mount_path,
-            ZED2_MOUNT_POS_MESH,
-            rotate_x_deg=None,
-            Gf_module=Gf,
-            UsdGeom_module=UsdGeom,
-        )
-
-        for zed_name, mount_path in [('zed1', zed1_mount_path), ('zed2', zed2_mount_path)]:
-            cam_path = f'{mount_path}/{zed_name}_camera'
-            cam_prim = UsdGeom.Camera.Define(stage, cam_path)
-            cam_prim.CreateFocalLengthAttr(18.0)
-            cam_prim.CreateHorizontalApertureAttr(36.0)
-            cam_prim.CreateVerticalApertureAttr(20.25)
-            cam_prim.CreateClippingRangeAttr(Gf.Vec2f(0.2, 25.0))
-            rp = rep.create.render_product(cam_path, resolution=(640, 360))
-            zed_render_products[zed_name] = rp
-
+        attach_zed_streams(stage, zed_ext_folder)
         for _ in range(10):
             app.update()
-
         print(
-            f'[INFO] ZED cameras attached at {zed1_mount_path}/zed1_camera and '
-            f'{zed2_mount_path}/zed2_camera (sl.sensor.camera={zed_ext_enabled})',
+            f'[INFO] ZED X streams on IPC {ZED1_STREAM_PORT}. '
+            f'Open it with the ZED SDK. Wrapper frame: {ZED1_OPTICAL_FRAME_ID}',
             flush=True,
         )
 
@@ -1192,8 +1176,6 @@ def main() -> None:
     # Optional ROS 2 bridge (--ros2 flag)
     # --------------------------------------------------------
     if args.ros2:
-        import omni.replicator.core as rep
-
         ext_manager = omni.kit.app.get_app().get_extension_manager()
         enable_required_extensions(
             ext_manager,
@@ -1246,23 +1228,6 @@ def main() -> None:
                         ('PublishLidar.inputs:type', 'point_cloud'),
                     ])
 
-            if args.zed and zed_render_products:
-                zed_topics = [
-                    ('zed1', '/zed1/zed_node/point_cloud/cloud_registered', ZED1_OPTICAL_FRAME_ID),
-                    ('zed2', '/zed2/zed_node/point_cloud/cloud_registered', ZED2_OPTICAL_FRAME_ID),
-                ]
-                for zed_name, topic_name, frame_id in zed_topics:
-                    node_name = f'PublishPCL_{zed_name}'
-                    rp_path = zed_render_products[zed_name].path
-                    create_nodes.append((node_name, 'isaacsim.ros2.bridge.ROS2CameraHelper'))
-                    connect_edges.append(('OnPlaybackTick.outputs:tick', f'{node_name}.inputs:execIn'))
-                    set_values.extend([
-                        (f'{node_name}.inputs:renderProductPath', rp_path),
-                        (f'{node_name}.inputs:topicName', topic_name),
-                        (f'{node_name}.inputs:frameId', frame_id),
-                        (f'{node_name}.inputs:type', 'depth_pcl'),
-                    ])
-
             og.Controller.edit(
                 {'graph_path': '/World/ROS2BridgeGraph', 'evaluator_name': 'execution'},
                 {
@@ -1276,7 +1241,6 @@ def main() -> None:
                 p for p in [
                     '/World/Vehicle/chassis',
                     ZED1_MOUNT_PATH,
-                    ZED2_MOUNT_PATH,
                     LIDAR_MOUNT_PATH,
                 ]
                 if stage.GetPrimAtPath(p).IsValid()
@@ -1306,9 +1270,8 @@ def main() -> None:
             print('[INFO] ROS 2 bridge active (/clock, /tf, /tf_static)', flush=True)
             if args.zed:
                 print(
-                    '[INFO] ROS 2 publishing ZED point clouds on '
-                    '/zed1/zed_node/point_cloud/cloud_registered and '
-                    '/zed2/zed_node/point_cloud/cloud_registered',
+                    '[INFO] ZED images are the IPC stream. /clock is available '
+                    'for the wrapper use_sim_time.',
                     flush=True,
                 )
             if lidar_ros:

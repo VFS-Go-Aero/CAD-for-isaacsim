@@ -38,6 +38,10 @@ CAD-for-isaacsim/
 │   ├── ardupilot_bridge.py    ArduCopter JSON lockstep bridge
 │   ├── ardu_poshold.py        ArduCopter GUIDED takeoff, hover, land
 │   ├── add_lidar_tutorial.py  RTX LiDAR tutorial with altitude hold
+│   ├── add_zed_tutorial.py    ZED X IPC stream from the chassis mounts
+│   ├── zed_setup.py           shared ZED mounts, stream graph, obstacles
+│   ├── zed_stream_check.py    open one ZED SDK stream and print a grab
+│   ├── ZED_TUTORIAL.md        ZED install, versions, and stream check
 │   ├── params/go_aero_ardupilot.param
 │   ├── joystick_control.py    (Phase 2) Xbox controller → MANUAL_CONTROL to PX4
 │   └── fly_demo.py            MAVSDK script: takeoff, fly square, land
@@ -66,6 +70,9 @@ CAD-for-isaacsim/
     ├── ardupilot_bridge.py
     ├── ardu_poshold.py
     ├── add_lidar_tutorial.py
+    ├── add_zed_tutorial.py
+    ├── zed_setup.py
+    ├── zed_stream_check.py
     ├── fly_demo.py
     └── params/go_aero_ardupilot.param
 ```
@@ -127,6 +134,14 @@ Start the bridge first. It steps PhysX once per servo packet on UDP 9002 and sen
 python ~/go_aero/add_lidar_tutorial.py --headless --hover 2.0 --duration 10
 ```
 
+### ZED tutorial
+
+```bash
+python ~/go_aero/add_zed_tutorial.py --headless --obstacles --ros2 --duration 120
+```
+
+Versions, the extension build, and the second-terminal stream check are in [ZED_TUTORIAL.md](./ZED_TUTORIAL.md).
+
 Connect a viewer with NICE DCV at `https://52.91.203.66:8443` to see the Isaac Sim viewport.
 
 ---
@@ -145,7 +160,7 @@ nano px4_visualizer.py         # or vim/code-server
 # When happy, copy back into the repo clone
 cd ~/go_aero_repo               # the cloned CAD-for-isaacsim
 git checkout sgoss/isaac-sim-import
-cp ~/go_aero/{build_scene,open_scene,px4_visualizer,px4_bridge,ardupilot_bridge,ardu_poshold,add_lidar_tutorial,fly_demo,_frames}.py simulation/
+cp ~/go_aero/{build_scene,open_scene,px4_visualizer,px4_bridge,ardupilot_bridge,ardu_poshold,add_lidar_tutorial,add_zed_tutorial,zed_setup,zed_stream_check,fly_demo,_frames}.py simulation/
 
 # Commit and push
 git add simulation/
@@ -211,6 +226,8 @@ Then restart the PX4 terminal.
 | `ardupilot_bridge.py` | USD scene + one SIM_JSON servo packet on UDP `:9002` | one JSON state reply per packet | ArduCopter `-f JSON` |
 | `ardu_poshold.py` | MAVLink UDP `:14540` | GUIDED takeoff, hover, land | ArduCopter |
 | `add_lidar_tutorial.py` | USD scene | RTX LiDAR ranges, upward hover force | — |
+| `add_zed_tutorial.py` | USD scene | ZED X IPC stream on port 30000 | ZED SDK / `zed_stream_check.py` |
+| `zed_setup.py` | — | mounts, stream graph, checkerboard boards | used by the tutorial and `ardupilot_bridge.py --zed` |
 | `fly_demo.py` | — | MAVSDK UDP `:14540` | PX4 (offboard) |
 | `joystick_control.py` | Xbox controller (USB) | MAVLink `MANUAL_CONTROL` over UDP `:14550` | PX4 GCS endpoint |
 

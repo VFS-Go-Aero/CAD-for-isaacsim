@@ -175,6 +175,7 @@ cp simulation/params/go_aero_ardupilot.param ~/go_aero/params/
 cp simulation/build_scene.py simulation/open_scene.py simulation/px4_visualizer.py \
    simulation/fly_demo.py simulation/px4_bridge.py simulation/ardupilot_bridge.py \
    simulation/ardu_poshold.py simulation/add_lidar_tutorial.py \
+   simulation/add_zed_tutorial.py simulation/zed_setup.py simulation/zed_stream_check.py \
    simulation/_frames.py ~/go_aero/
 
 # Build the USD scene (headless, takes ~60s)
@@ -312,6 +313,16 @@ python ~/go_aero/add_lidar_tutorial.py --headless --hover 2.0 --duration 10
 
 The chassis is held at the target altitude by an upward force while the RTX LiDAR reports ranges.
 
+### ZED tutorial
+
+Build `stereolabs/zed-isaac-sim` and install ZED SDK 5.5 or newer on the sim host first. See [`simulation/ZED_TUTORIAL.md`](simulation/ZED_TUTORIAL.md).
+
+```bash
+python ~/go_aero/add_zed_tutorial.py --headless --obstacles --ros2 --duration 120
+```
+
+The nose camera streams on IPC port 30000. `ardupilot_bridge.py --zed` uses the same stream.
+
 ## Files
 
 | File | Description |
@@ -327,6 +338,10 @@ The chassis is held at the target altitude by an upward force while the RTX LiDA
 | `simulation/ardupilot_bridge.py` | ArduCopter JSON bridge (PhysX lockstep) |
 | `simulation/ardu_poshold.py` | ArduCopter GUIDED takeoff, hover, land |
 | `simulation/add_lidar_tutorial.py` | RTX LiDAR tutorial with altitude hold |
+| `simulation/add_zed_tutorial.py` | ZED X IPC stream from the chassis mounts |
+| `simulation/zed_setup.py` | Shared ZED mounts, stream graph, and checkerboard obstacles |
+| `simulation/zed_stream_check.py` | Opens one ZED SDK stream and prints a stereo grab |
+| `simulation/ZED_TUTORIAL.md` | ZED install, versions, and how to open the stream |
 | `simulation/params/go_aero_ardupilot.param` | ArduCopter airframe and avoidance parameters |
 | `simulation/ARCHITECTURE.md` | Process topology, data flow, coordinate frames |
 | `simulation/PX4_API.md` | MAVLink + MAVSDK reference for the simulation |
@@ -359,6 +374,7 @@ The chassis is held at the target altitude by an upward force while the RTX LiDA
 - **Visualizer** — `px4_visualizer.py` mirrors PX4 SIH or ArduCopter SITL. Rigid bodies are disabled in that process so PhysX does not move the model.
 - **Placeholder dynamics** — The PhysX bridges use a 5 kg chassis and a linear thrust map (command 0.5 equals weight). That is not the real Go Aero mass, inertia, or propeller curve.
 - **LiDAR** — `add_lidar_tutorial.py`, and `--lidar` on either bridge, read an RTX LiDAR on the chassis mount.
+- **ZED** — `--zed` streams two ZED X cameras over IPC. Depth accuracy, the unmodified detection scripts, and a closed-loop hover on that stream are still open. See `simulation/ZED_TUTORIAL.md`.
 
 ## Next Steps for Accurate Simulation
 

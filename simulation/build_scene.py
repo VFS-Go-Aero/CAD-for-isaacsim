@@ -248,6 +248,26 @@ lidar_mount.AddTranslateOp().Set(Gf.Vec3d(0.468, -0.04, -0.515))
 lidar_mount.AddRotateZOp().Set(-90.0)
 print('[BUILD] Added lidar_mount under chassis')
 
+# ============================================================
+# ZED X mounts — children of the chassis, same rule as the LiDAR.
+# A propeller parent would spin the camera with the prop.
+# One camera. Placeholder pose matches the ROS wrapper until a
+# calibration exists: 0.1524 m forward and 0.127 m down, mapped into
+# this mesh frame as (0, -0.127, -0.1524).
+# The ZED X asset looks along local +X. Mesh -Z is the nose.
+# Translate is authored first so the rotations do not move the offset.
+# RotateY(90) sends asset +X along mesh -Z (the nose, no pitch).
+# RotateZ(90) then levels the body: the asset's camera +Y (image up)
+# becomes mesh +Y, which is world up after the vehicle RotateX(90),
+# and the stereo baseline lies horizontal. The camera prim is
+# referenced at runtime by zed_setup.py.
+# ============================================================
+zed_mount = UsdGeom.Xform.Define(stage, '/World/Vehicle/chassis/zed1_mount')
+zed_mount.AddTranslateOp().Set(Gf.Vec3d(0.0, -0.127, -0.1524))
+zed_mount.AddRotateZOp().Set(90.0)
+zed_mount.AddRotateYOp().Set(90.0)
+print('[BUILD] Added zed1_mount under chassis')
+
 print('[BUILD] Physics setup complete.')
 
 # Let stage compose

@@ -4,7 +4,7 @@ How the Go Aero simulation hangs together — processes, data flow, coordinate f
 
 ## Stack
 
-Isaac Sim 6.2 (`isaacsim==6.2.0.0`) and Isaac Lab 3 (`isaaclab==3.0.0`) on Python 3.12, conda env `env_isaaclab_3`. Launcher scripts register `--headless` because Isaac Lab 3 runs headless unless `--viz kit` is passed. Rigid body and IMU reads go through `isaacsim.core.experimental.prims.RigidPrim` and `isaacsim.sensors.experimental.physics`, after `SimulationManager.initialize_physics()`. RTX LiDAR is `isaacsim.sensors.experimental.rtx.Lidar.create` with the `generic-model-output` annotator.
+Isaac Sim 6.2 (`isaacsim==6.2.0.0`) and Isaac Lab 3 (`isaaclab==3.0.0`) on Python 3.12, conda env `env_isaaclab_3`. Launcher scripts register `--headless` because Isaac Lab 3 runs headless unless `--viz kit` is passed. Rigid body and IMU reads go through `isaacsim.core.experimental.prims.RigidPrim` and `isaacsim.sensors.experimental.physics`, after `SimulationManager.initialize_physics()`. RTX LiDAR is `isaacsim.sensors.experimental.rtx.Lidar.create` with the `generic-model-output` annotator. Simulated ZED X cameras use the Stereolabs `sl.sensor.camera` extension. `zed_setup.py` references one `ZED_X.usdc` on `zed1_mount` and streams its left and right images over IPC on port 30000. A ZED SDK process opens that stream. `--ros2` publishes `/clock` for `use_sim_time`.
 
 ## Two Simulation Modes
 
