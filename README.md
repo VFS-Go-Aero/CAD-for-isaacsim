@@ -540,6 +540,79 @@ import omni.usd
 omni.usd.get_context().get_stage().GetPrimAtPath("/World/Terrain").SetActive(False)
 ```
 
+## Run ArduPilot with the Isaac Sim window and LiDAR
+
+Use the conda env's Python by its full path in every Isaac terminal. `~/.profile` puts `venv-ardupilot` first in each new shell, and running under it left the drone frozen in the window. Don't run `sim_vehicle.py` in conda.
+
+Set this in each Isaac terminal first:
+
+```
+export DISPLAY=:1
+export ROS_DISTRO=jazzy
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+unset VIRTUAL_ENV
+export LD_LIBRARY_PATH=$HOME/miniconda3/envs/env_isaaclab_3/lib/python3.12/site-packages/isaacsim/exts/isaacsim.ros2.core/jazzy/lib:$LD_LIBRARY_PATH
+```
+
+Update scripts and rebuild the scene:
+
+```
+cd ~/go_aero_repo && git pull
+cp meshes/* ~/go_aero/meshes/
+cp simulation/params/go_aero_ardupilot.param ~/go_aero/params/
+cp simulation/*.py ~/go_aero/
+~/miniconda3/envs/env_isaaclab_3/bin/python ~/go_aero/build_scene.py --headless
+```
+
+### Mode 2 with window and LiDAR
+
+Terminal 1, bridge first (drop `--lidar` to run without it). The window takes 2-3 minutes to load:
+
+```
+~/miniconda3/envs/env_isaaclab_3/bin/python ~/go_aero/ardupilot_bridge.py --device cuda --port 9002 --lidar --visualizer kit 2>&1 | tee ~/bridge_run.log
+```
+
+Terminal 2, no conda:
+
+```
+cd ~/ardupilot
+Tools/autotest/sim_vehicle.py -v ArduCopter -f JSON --no-rebuild \
+  --add-param-file=$HOME/go_aero/params/go_aero_ardupilot.param \
+  --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14540
+```
+
+Terminal 3:
+
+```
+unset VIRTUAL_ENV
+~/miniconda3/envs/env_isaaclab_3/bin/python ~/go_aero/ardu_poshold.py --port 14540 --altitude 5 --hold 30
+```
+
+### Mode 1 with window
+
+Terminal 1: same `sim_vehicle.py` command without `-f JSON`.
+
+Terminal 2:
+
+```
+~/miniconda3/envs/env_isaaclab_3/bin/python ~/go_aero/px4_visualizer.py --device cuda --mavlink-port 14550 --visualizer kit
+```
+
+Terminal 3: same `ardu_poshold.py` command as above.
+
+### LiDAR tutorial
+
+```
+python ~/go_aero/add_lidar_tutorial.py --headless --hover 2.0 --duration 10
+```
+
+### Notes
+
+- `--lidar` runs the LiDAR in Isaac Sim only. The bridge doesn't send it to ArduPilot. `PRX1_TYPE,2` expects `OBSTACLE_DISTANCE_3D` from another process.
+- `[TAKEOFF] altitude=` in `ardu_poshold.py` is ArduPilot's position estimate, not the LiDAR.
+- No heartbeat on 14540 in JSON mode means the bridge isn't running. Start it first.
+- `Arm: Need Position Estimate` means the EKF isn't ready. Wait until `t=` in `~/bridge_run.log` has been rising for a minute or so, then run `ardu_poshold.py` once.
+
 A full visualizer restart reloads the scene and brings it back.
 
 ### Troubleshooting
