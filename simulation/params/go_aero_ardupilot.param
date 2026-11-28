@@ -44,6 +44,10 @@ AHRS_YAW_P,0.2
 ANGLE_MAX,3000
 ARMING_ACCTHRESH,0.75
 ARMING_CHECK,0
+# 4.8 renamed ARMING_CHECK to ARMING_SKIPCHK. -1 skips the non-mandatory
+# checks. The stored accel offsets are zero, and the JSON bridge steps at
+# 250 Hz against SCHED_LOOP_RATE 400, so those checks refuse the arm.
+ARMING_SKIPCHK,-1
 ARMING_CRSDP_IGN,0
 ARMING_MAGTHRESH,100
 ARMING_MIS_ITEMS,0

@@ -65,6 +65,69 @@ def add_mesh(stage, prim_path, stl_file, color=(0.5, 0.5, 0.5)):
     return stl
 
 
+def _angular_distance(a, b):
+    return np.abs((a - b + np.pi) % (2.0 * np.pi) - np.pi)
+
+
+def _convex_hull(points, pitch=0.03, limit=60):
+    """Voxelize, then hull. PhysX rejects a convex with more than 64 vertices."""
+    pts = np.asarray(points, dtype=np.float64)
+    step = float(pitch)
+    hull = None
+    for _ in range(8):
+        keys = np.floor(pts / step).astype(np.int64)
+        _, idx = np.unique(keys, axis=0, return_index=True)
+        hull = trimesh.convex.convex_hull(pts[idx])
+        if len(hull.vertices) <= limit:
+            return hull
+        step *= 1.3
+    return hull
+
+
+def add_convex_collider(stage, prim_path, hull):
+    mesh = UsdGeom.Mesh.Define(stage, prim_path)
+    verts = [Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in hull.vertices]
+    mesh.GetPointsAttr().Set(Vt.Vec3fArray(verts))
+    mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray(hull.faces.flatten().tolist()))
+    mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray([3] * len(hull.faces)))
+    mesh.GetSubdivisionSchemeAttr().Set('none')
+    mesh.GetDoubleSidedAttr().Set(True)
+    mesh.GetPurposeAttr().Set('guide')
+    UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
+    collision = UsdPhysics.MeshCollisionAPI.Apply(mesh.GetPrim())
+    collision.CreateApproximationAttr('convexHull')
+    return mesh
+
+
+def add_frame_colliders(stage, chassis_path, frame_mesh):
+    """Collision that follows the body, the four arms, and the gear on each arm.
+
+    The visual mesh is a moving triangle mesh, which PhysX will not use as a
+    dynamic collider. One hull around the whole airframe would also fill the
+    open space between the arms, so the center and each arm are separate hulls.
+    """
+    verts = np.asarray(frame_mesh.vertices, dtype=np.float64)
+    radius = np.hypot(verts[:, 0], verts[:, 2])
+    angle = np.arctan2(verts[:, 2], verts[:, 0])
+    arms = {
+        'arm_fr': np.arctan2(-0.515, 0.468),
+        'arm_fl': np.arctan2(-0.515, -0.468),
+        'arm_rr': np.arctan2(0.515, 0.468),
+        'arm_rl': np.arctan2(0.515, -0.468),
+    }
+    half = np.deg2rad(18.0)
+    assigned = np.zeros(len(verts), dtype=bool)
+    for name, direction in arms.items():
+        mask = (radius > 0.20) & (_angular_distance(angle, direction) < half)
+        assigned |= mask
+        hull = _convex_hull(verts[mask])
+        add_convex_collider(stage, f'{chassis_path}/{name}', hull)
+        print(f'[BUILD] {name} convex {len(hull.vertices)} verts', flush=True)
+    body = _convex_hull(verts[~assigned])
+    add_convex_collider(stage, f'{chassis_path}/body', body)
+    print(f'[BUILD] body convex {len(body.vertices)} verts', flush=True)
+
+
 # ============================================================
 # Scene setup
 # ============================================================
@@ -150,8 +213,8 @@ print('[BUILD] Adding chassis...')
 chassis_xform = UsdGeom.Xform.Define(stage, '/World/Vehicle/chassis')
 chassis_prim = chassis_xform.GetPrim()
 
-# Visual mesh
-add_mesh(stage, '/World/Vehicle/chassis/mesh', 'frame.stl', color=(0.35, 0.35, 0.4))
+# Visual mesh. Collision is a separate set of convex pieces, added below.
+frame_mesh = add_mesh(stage, '/World/Vehicle/chassis/mesh', 'frame.stl', color=(0.35, 0.35, 0.4))
 
 # Rigid body
 UsdPhysics.RigidBodyAPI.Apply(chassis_prim)
@@ -164,15 +227,7 @@ mass_api.CreateCenterOfMassAttr(Gf.Vec3f(0, -0.1, 0))  # slightly below center
 # so PX4's attitude loop converges quickly; tune against real vehicle later.
 mass_api.CreateDiagonalInertiaAttr(Gf.Vec3f(0.5, 0.5, 0.8))
 
-# Box collider for chassis (simplified). Scale is in the mesh Y-up frame, so
-# (X, Y, Z) ~ (width, height, depth). Keep it conservative - slightly smaller
-# than the visual hull so props and arms never clip into it.
-collider = UsdGeom.Cube.Define(stage, '/World/Vehicle/chassis/collider')
-collider.CreateSizeAttr(1.0)
-collider.AddScaleOp().Set(Gf.Vec3f(0.9, 0.25, 1.0))
-collider.AddTranslateOp().Set(Gf.Vec3d(0, -0.15, 0))
-UsdPhysics.CollisionAPI.Apply(collider.GetPrim())
-collider.GetPurposeAttr().Set('guide')  # invisible collider
+add_frame_colliders(stage, '/World/Vehicle/chassis', frame_mesh)
 
 # ============================================================
 # IMU mount point — child Xform of the chassis rigid body.
@@ -207,10 +262,23 @@ for name, info in props.items():
     # Visual mesh
     add_mesh(stage, f'/World/Vehicle/{name}/mesh', info['file'], color=(0.12, 0.12, 0.12))
 
+    # The blade STL is one angle. A spinning rotor occupies the disc of that
+    # radius, and the disc is the collider. It overlaps the arm, so the prop
+    # does not collide with the chassis it is jointed to.
+    disc = UsdGeom.Cylinder.Define(stage, f'/World/Vehicle/{name}/disc')
+    disc.CreateAxisAttr('Y')
+    disc.CreateRadiusAttr(0.4065)
+    disc.CreateHeightAttr(0.02)
+    disc.AddTranslateOp().Set(Gf.Vec3d(0.0, -0.004, 0.0))
+    disc.GetPurposeAttr().Set('guide')
+    UsdPhysics.CollisionAPI.Apply(disc.GetPrim())
+
     # Rigid body for prop
     UsdPhysics.RigidBodyAPI.Apply(prop_prim)
     prop_mass = UsdPhysics.MassAPI.Apply(prop_prim)
     prop_mass.CreateMassAttr(0.1)  # 100g per prop
+    filtered = UsdPhysics.FilteredPairsAPI.Apply(prop_prim)
+    filtered.CreateFilteredPairsRel().AddTarget(Sdf.Path('/World/Vehicle/chassis'))
 
     # Revolute joint — spin around Y axis (which becomes Z after vehicle rotation)
     joint_path = f'/World/Vehicle/joints/{name}_joint'

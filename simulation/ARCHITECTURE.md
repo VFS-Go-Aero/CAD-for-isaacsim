@@ -49,7 +49,7 @@ PX4's `simulator_mavlink` module is the one that opens the connection — it's t
 
 ### ArduCopter visualizer — SITL physics, Isaac Sim mirrors pose
 
-Same Isaac process as Mode 1. ArduCopter flies its built-in quadrotor. `sim_vehicle.py` sends MAVLink to UDP 14550 (the visualizer) and UDP 14540 (`ardu_poshold.py`). The visualizer disables the USD rigid bodies, deactivates the physics scene, and does not play the timeline, so PhysX cannot drop the model through the ground plane. The LiDAR heightfield stays inactive unless `--terrain` is passed, and the vehicle origin sits 0.53 m above the surface so the landing gear clears the ground plane. The frame mesh reaches 0.524 m below the origin after the Y-up rotation, farther than the collision box. Heartbeats of type `MAV_TYPE_GCS` are ignored, so stream requests go to ArduCopter rather than MAVProxy. It requests position, attitude, and servo output with both `REQUEST_DATA_STREAM` and `SET_MESSAGE_INTERVAL`.
+Same Isaac process as Mode 1. ArduCopter flies its built-in quadrotor. `sim_vehicle.py` sends MAVLink to UDP 14550 (the visualizer) and UDP 14540 (`ardu_poshold.py`). The visualizer disables the USD rigid bodies, deactivates the physics scene, and does not play the timeline, so PhysX cannot drop the model through the ground plane. The LiDAR heightfield stays inactive unless `--terrain` is passed, and the vehicle origin sits 0.53 m above the surface so the landing gear clears the ground plane. The frame mesh reaches 0.524 m below the origin after the Y-up rotation, and the convex collision meshes follow that gear. Heartbeats of type `MAV_TYPE_GCS` are ignored, so stream requests go to ArduCopter rather than MAVProxy. It requests position, attitude, and servo output with both `REQUEST_DATA_STREAM` and `SET_MESSAGE_INTERVAL`.
 
 ### ArduCopter PhysX bridge — `ardupilot_bridge.py`
 
@@ -131,8 +131,8 @@ Pure-USD scene assembly. Run once per scene structure change.
 1. **Physics scene** — gravity (0, 0, −9.81)
 2. **Ground plane + lighting** — distant + dome lights
 3. **Vehicle Xform** at `/World/Vehicle`, `RotateXOp(90)` to convert mesh Y-up to world Z-up
-4. **Chassis** — rigid body, `mass = 5 kg`, simplified box collider, marked as `ArticulationRootAPI`
-5. **4 propellers** — each: STL mesh, rigid body (`0.1 kg`), revolute joint to chassis around Y axis, `DriveAPI('angular')` with velocity drive (stiffness=0, damping=0.5)
+4. **Chassis** — rigid body, `mass = 5 kg`, convex collision for the body and each arm including the gear. `/World/Vehicle` carries `ArticulationRootAPI`
+5. **4 propellers** — each: STL mesh, rigid body (`0.1 kg`), a disc collider the radius of the blade, revolute joint to chassis around Y axis, `DriveAPI('angular')` with velocity drive (stiffness=0, damping=0.5). The disc does not collide with the chassis
 
 Output: `~/go_aero/assets/vehicle_scene.usd`. The visualizer reads this read-only.
 

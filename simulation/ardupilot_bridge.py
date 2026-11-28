@@ -874,6 +874,18 @@ def main() -> None:
 
     app = omni.kit.app.get_app()
 
+    # The RTX viewport reads Fabric, not the PhysX tensor. This extension
+    # has to be on before the stage loads or the picture stays at the
+    # authored pose while the simulation moves.
+    if not getattr(args, 'headless', False):
+        import carb.settings
+        carb.settings.get_settings().set('/physics/fabricEnabled', True)
+        carb.settings.get_settings().set('/physics/fabricUpdateTransformations', True)
+        if not app.get_extension_manager().set_extension_enabled_immediate('omni.physx.fabric', True):
+            print('[WARN] Could not enable omni.physx.fabric', flush=True)
+        else:
+            print('[INFO] PhysX Fabric output on', flush=True)
+
     # --------------------------------------------------------
     # Load USD Scene
     # --------------------------------------------------------
@@ -945,13 +957,16 @@ def main() -> None:
     except Exception as exc:
         print(f'[WARN] Could not configure 250 Hz PhysX scene rate: {exc}', flush=True)
 
-    # The terrain sheet at the origin is about 0.34 m high. The chassis rests
-    # on the ground plane at 0.16 m, so a climb flies into that sheet.
+    # The terrain sheet at the origin is about 0.34 m high. The flight rests
+    # on the ground plane, so a climb would fly into that sheet.
     terrain_prim = stage.GetPrimAtPath('/World/Terrain')
     if terrain_prim.IsValid():
         terrain_collision = UsdPhysics.CollisionAPI.Apply(terrain_prim)
         terrain_collision.CreateCollisionEnabledAttr().Set(False)
-        print('[INFO] Terrain collision off; lockstep flight uses the ground plane', flush=True)
+        # The sheet is about 0.34 m high at the origin. The gear rests on the
+        # ground plane, so leaving the sheet visible puts the airframe inside it.
+        terrain_prim.SetActive(False)
+        print('[INFO] Hid /World/Terrain; the vehicle rests on the ground plane', flush=True)
 
     from pxr import Usd
     owner_target = Sdf.Path('/World/PhysicsScene')
@@ -977,8 +992,19 @@ def main() -> None:
     from isaacsim.core.simulation_manager import SimulationManager
     SimulationManager.initialize_physics()
 
+    # The collider overlay reads the USD transform. Fabric already follows
+    # the simulated pose, so without this copy the green shapes stay on the
+    # authored 1.5 m vehicle xform while the mesh sits on the ground.
+    _show_viewport = not getattr(args, 'headless', False)
+    _physx = None
+    if _show_viewport:
+        import omni.physx
+        _physx = omni.physx.get_physx_interface()
+
     for _ in range(30):
         app.update()
+        if _physx is not None:
+            _physx.update_transformations(True, True, False)
 
     from pxr import PhysxSchema as _PhysxSchema
     scene_rates = []
@@ -1310,6 +1336,8 @@ def main() -> None:
             except socket.timeout:
                 if not getattr(args, 'headless', False):
                     app.update()
+                    if _physx is not None:
+                        _physx.update_transformations(True, True, False)
                 continue
             except OSError:
                 break
@@ -1331,9 +1359,10 @@ def main() -> None:
     # The authored pose is level, nose north. Releasing the vehicle from 1.5 m
     # drops it onto the terrain before any JSON state is sent, and it comes to
     # rest yawed about 73 deg. Put it on its gear in the authored orientation
-    # now, so the first state the EKF sees is that pose. 0.16 m is the chassis
-    # origin height once the gear is on the ground.
-    REST_Z = 0.16
+    # now, so the first state the EKF sees is that pose. The feet reach
+    # 0.524 m below the chassis origin, so 0.53 m leaves them just clear
+    # of the plane and the contact settles them onto it.
+    REST_Z = 0.53
     chassis.set_world_poses(
         positions=np.array([[0.0, 0.0, REST_Z]], dtype=np.float32),
         orientations=np.array([list(AUTHORED_QUAT_WXYZ)], dtype=np.float32),
@@ -1343,6 +1372,8 @@ def main() -> None:
         angular_velocities=np.zeros((1, 3), dtype=np.float32),
     )
     app.update()
+    if _physx is not None:
+        _physx.update_transformations(True, True, False)
     pos_w, quat_w = chassis.get_world_poses()
     pos_w = pos_w.numpy()[0].astype(np.float64)
     quat_w = quat_w.numpy()[0].astype(np.float64)
@@ -1375,6 +1406,22 @@ def main() -> None:
     lin_acc_lp = np.zeros(3, dtype=np.float64)
     gyro_lp = np.zeros(3, dtype=np.float64)
     _render_period_steps = max(1, int(round(SENSOR_RATE / max(args.render_hz, 1.0))))
+    # PhysX owns the chassis. The viewport draws the USD/Fabric pose, which
+    # stays at the loaded transform unless we copy the simulated pose across.
+    prop_visual_ops = {}
+    prop_visual_angles = {}
+    if _show_viewport:
+        from pxr import UsdGeom
+        for name in PROP_LAYOUT:
+            mesh = stage.GetPrimAtPath(f'/World/Vehicle/{name}/mesh')
+            if not mesh.IsValid():
+                continue
+            prop_visual_ops[name] = UsdGeom.Xformable(mesh).AddRotateYOp()
+            prop_visual_angles[name] = 0.0
+        print(
+            f'[INFO] Viewport following the PhysX pose at {args.render_hz:.0f} Hz',
+            flush=True,
+        )
 
     def recv_one_packet(timeout: float) -> ServoPacket | None:
         """Return one servo packet, or None on timeout. Does not step PhysX."""
@@ -1450,6 +1497,22 @@ def main() -> None:
             simulation_app.update()
             step += 1
             sim_time = step * SIM_DT
+            if prop_visual_ops and step % _render_period_steps == 0:
+                # The joint drives stay at zero. A live drive torque swamps the
+                # attitude moment, so the blades are turned on the mesh only.
+                # Two blades look the same every 180 deg, and a step near that
+                # between pictures reads as a slow crawl. Cap the drawn step
+                # at 90 deg so each frame shows a new blade position.
+                for i, name in enumerate(prop_order):
+                    op = prop_visual_ops.get(name)
+                    if op is None or i >= len(cmds):
+                        continue
+                    step_deg = PROP_LAYOUT[name][spin_key] * cmds[i] * 160.0
+                    step_deg = max(-90.0, min(90.0, step_deg))
+                    prop_visual_angles[name] = (prop_visual_angles[name] + step_deg) % 360.0
+                    op.Set(prop_visual_angles[name])
+            if _physx is not None and step % _render_period_steps == 0:
+                _physx.update_transformations(True, True, False)
 
             # --------------------------------------------------
             # 4. Read updated IMU & pose/velocity state from PhysX

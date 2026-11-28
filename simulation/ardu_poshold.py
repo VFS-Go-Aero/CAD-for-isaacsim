@@ -193,6 +193,51 @@ def send_gcs_heartbeat(mav: Any, mavutil_mod: Any) -> None:
     )
 
 
+def _param_id(raw: Any) -> str:
+    if isinstance(raw, bytes):
+        raw = raw.decode('utf-8', errors='ignore')
+    return str(raw).strip('\x00').strip()
+
+
+def set_param(mav: Any, mavutil_mod: Any, name: str, value: float, timeout: float = 3.0) -> bool:
+    """Set one parameter and wait for the PARAM_VALUE echo."""
+    mav.mav.param_set_send(
+        mav.target_system,
+        mav.target_component,
+        name.encode('utf-8'),
+        float(value),
+        mavutil_mod.mavlink.MAV_PARAM_TYPE_INT32,
+    )
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        msg = mav.recv_match(type='PARAM_VALUE', blocking=True, timeout=0.5)
+        if msg is None or _param_id(msg.param_id) != name:
+            continue
+        print(f'[INFO] {name}={float(msg.param_value):g}', flush=True)
+        return abs(float(msg.param_value) - float(value)) < 0.5
+    print(f'[WARN] {name} was not acknowledged', flush=True)
+    return False
+
+
+def relax_sitl_arming(mav: Any, mavutil_mod: Any) -> None:
+    """Turn off the checks that the JSON bridge cannot pass.
+
+    ArduCopter 4.8 ignores ARMING_CHECK and reads ARMING_SKIPCHK. A value
+    of -1 skips the accel-calibration and main-loop-rate checks. GUIDED
+    still requires an EKF home, which is not one of those checks.
+    """
+    print('[INFO] Skipping non-mandatory arming checks (ARMING_SKIPCHK=-1)...', flush=True)
+    skipped = set_param(mav, mavutil_mod, 'ARMING_SKIPCHK', -1)
+    # Older firmware still honors this name. A 4.8 build has nothing to set.
+    set_param(mav, mavutil_mod, 'ARMING_CHECK', 0)
+    if not skipped:
+        print(
+            '[WARN] ARMING_SKIPCHK did not stick. The zero accel offsets and the '
+            '250 Hz lockstep loop will keep refusing the arm.',
+            flush=True,
+        )
+
+
 def set_copter_mode(mav: Any, mavutil_mod: Any, mode_name: str, timeout: float = 10.0) -> bool:
     """Switch ArduCopter to `mode_name` and wait for HEARTBEAT confirmation."""
     mapping = mav.mode_mapping() or ARDUCOPTER_MODES
@@ -217,16 +262,31 @@ def set_copter_mode(mav: Any, mavutil_mod: Any, mode_name: str, timeout: float =
     return False
 
 
-def wait_for_ekf_gps(mav: Any, timeout: float = 45.0) -> None:
-    """Wait until ArduPilot reports a 3D GPS fix and valid EKF horizontal position."""
+def wait_for_ekf_gps(mav: Any, mavutil_mod: Any, timeout: float = 120.0) -> None:
+    """Wait until the EKF is using GPS. GUIDED will not arm before that."""
     print('[INFO] Waiting for EKF + 3D GPS readiness...', flush=True)
+    for msg_id, hz in (
+        (mavutil_mod.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, 5),
+        (mavutil_mod.mavlink.MAVLINK_MSG_ID_EKF_STATUS_REPORT, 5),
+        (mavutil_mod.mavlink.MAVLINK_MSG_ID_HOME_POSITION, 1),
+    ):
+        mav.mav.command_long_send(
+            mav.target_system,
+            mav.target_component,
+            mavutil_mod.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            0,
+            float(msg_id),
+            float(1_000_000 // hz),
+            0, 0, 0, 0, 0,
+        )
+
     deadline = time.time() + timeout
     gps_ok = False
     ekf_ok = False
 
     while time.time() < deadline:
         msg = mav.recv_match(
-            type=['GPS_RAW_INT', 'EKF_STATUS_REPORT', 'STATUSTEXT'],
+            type=['GPS_RAW_INT', 'EKF_STATUS_REPORT', 'HOME_POSITION', 'STATUSTEXT'],
             blocking=True,
             timeout=1.0,
         )
@@ -243,6 +303,8 @@ def wait_for_ekf_gps(mav: Any, timeout: float = 45.0) -> None:
         elif mtype == 'GPS_RAW_INT':
             if msg.fix_type >= 3:
                 gps_ok = True
+        elif mtype == 'HOME_POSITION':
+            ekf_ok = True
         elif mtype == 'EKF_STATUS_REPORT':
             # EKF_POS_HORIZ_ABS = 0x10 (16), EKF_CONST_POS_MODE = 0x80 (128)
             if (msg.flags & 0x10) != 0 and (msg.flags & 0x80) == 0:
@@ -252,7 +314,10 @@ def wait_for_ekf_gps(mav: Any, timeout: float = 45.0) -> None:
             print('[INFO] EKF and 3D GPS fix ready.', flush=True)
             return
 
-    print('[WARN] Proceeding after EKF wait timeout; attempting arm anyway.', flush=True)
+    raise RuntimeError(
+        "EKF has no home yet, so GUIDED will not arm. Wait until SITL prints "
+        "'EKF3 IMU0 is using GPS' before starting this script."
+    )
 
 
 def arm_and_takeoff(mav: Any, mavutil_mod: Any, target_alt_m: float, timeout: float = 180.0) -> None:
@@ -709,8 +774,10 @@ def main() -> None:
     )
 
     result: dict[str, float | bool] | None = None
+    flight_error: Exception | None = None
     try:
-        wait_for_ekf_gps(mav)
+        relax_sitl_arming(mav, mavutil)
+        wait_for_ekf_gps(mav, mavutil)
         arm_and_takeoff(mav, mavutil, args.altitude)
 
         if effective_mode == 'guided-forward':
@@ -739,12 +806,17 @@ def main() -> None:
             )
     except KeyboardInterrupt:
         print('\n[INFO] Interrupted! Switching to LAND and clearing overrides...', flush=True)
+    except Exception as exc:
+        flight_error = exc
     finally:
         try:
             land_and_disarm(mav, mavutil)
         except Exception as exc:
             print(f'[WARN] Landing cleanup error: {exc}', flush=True)
 
+    if flight_error is not None:
+        print(f'[ERROR] {flight_error}', flush=True)
+        sys.exit(1)
     if result is not None and not result.get('passed', False):
         sys.exit(1)
 
